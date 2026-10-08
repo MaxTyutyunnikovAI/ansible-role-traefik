@@ -1,0 +1,15 @@
+---
+# ============================================================================
+# Logrotate: manage /etc/logrotate.d/traefik. postrotate sends SIGUSR1 to the
+# running Traefik process, which reopens its log files without downtime
+# (native Traefik behavior). No service restart is needed here.
+# ============================================================================
+
+- name: Deploy logrotate configuration for Traefik logs
+  ansible.builtin.template:
+    src: traefik-logrotate.j2
+    dest: /etc/logrotate.d/traefik
+    owner: root
+    group: root
+    mode: "0644"
+  # Logrotate changes never require restarting Traefik itself.

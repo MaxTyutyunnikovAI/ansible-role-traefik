@@ -1,0 +1,21 @@
+---
+# Converge playbook for the default Molecule scenario.
+- name: Converge — apply the Traefik v3 role
+  hosts: all
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    # Minimal host preparation for a bare RockyLinux 9 container image:
+    # unarchive module needs tar/gzip; pgrep comes with procps-ng (logrotate).
+    - name: Install required packages for the role
+      ansible.builtin.package:
+        name:
+          - tar
+          - gzip
+          - procps-ng
+          - logrotate
+        state: present
+
+  roles:
+    - role: traefik

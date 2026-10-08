@@ -1,0 +1,23 @@
+---
+# ============================================================================
+# Systemd: deploy hardened unit, daemon-reload, enable + start the service.
+# Unit changes also flow through the validated-restart handler chain.
+# ============================================================================
+
+- name: Deploy Traefik systemd unit (with security hardening)
+  ansible.builtin.template:
+    src: traefik.service.j2
+    dest: "/etc/systemd/system/{{ traefik_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd daemon for Traefik
+    - validate_and_restart_traefik
+
+- name: Enable and start Traefik service on boot
+  ansible.builtin.systemd:
+    name: "{{ traefik_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true

@@ -1,0 +1,22 @@
+{#-
+    Logrotate for Traefik logs. Traefik reopens its log files on SIGUSR1,
+    so postrotate signals the running process instead of restarting it —
+    zero-downtime rotation. `copytruncate` is intentionally NOT used
+    (it can lose lines); USR1-based reopen is the documented approach.
+-#}
+# {{ ansible_managed }}
+{{ traefik_log_dir }}/*.log {
+    su {{ traefik_system_user }} {{ traefik_system_group }}
+    {{ traefik_logrotate_frequency }}
+    rotate {{ traefik_logrotate_rotate }}
+    maxsize {{ traefik_logrotate_maxsize }}
+    missingok
+    notifempty
+    compress
+    delaycompress
+    dateext
+    sharedscripts
+    postrotate
+        /bin/kill -USR1 $(cat /run/{{ traefik_service_name }}/{{ traefik_service_name }}.pid 2>/dev/null) 2>/dev/null || /usr/bin/pgrep -f '{{ traefik_bin_dir }}/traefik' | xargs -r kill -USR1 || true
+    endscript
+}

@@ -1,0 +1,65 @@
+{#-
+    Hardened systemd unit for Traefik v3.
+    Mandatory security keys: NoNewPrivileges / ProtectSystem / ProtectHome /
+    PrivateTmp. CAP_NET_BIND_SERVICE lets the unprivileged traefik user bind
+    :80/:443. ReadWritePaths whitelists log & data dirs because ProtectSystem
+    makes the rest of the filesystem read-only-ish for the service.
+-#}
+# {{ ansible_managed }}
+[Unit]
+Description=Traefik v3 - The Reverse Proxy At Scale
+Documentation=https://doc.traefik.io/traefik/
+After=network-online.target
+Wants=network-online.target
+# Do not let a crash-loop take the box down forever.
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User={{ traefik_system_user }}
+Group={{ traefik_system_group }}
+
+WorkingDirectory={{ traefik_data_dir }}
+ExecStart={{ traefik_bin_dir }}/traefik \
+  --configFile={{ traefik_static_config_file }}
+
+Restart=on-failure
+RestartSec={{ traefik_restart_sec }}
+TimeoutStartSec={{ traefik_start_timeout }}
+LimitNOFILE={{ traefik_limit_nofile }}
+
+# --- Security hardening -----------------------------------------------------
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+
+# Bind :80/:443 as non-root without full root privileges
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+{% for cap in traefik_extra_capabilities %}
+CapabilityBoundingSet={{ cap }}
+AmbientCapabilities={{ cap }}
+{% endfor %}
+
+ReadWritePaths={{ traefik_log_dir }}
+ReadWritePaths={{ traefik_data_dir }}
+
+# /run is always writable even under ProtectSystem, so no ReadWritePaths entry
+# is needed for it. The pidfile below is consumed by the logrotate postrotate
+# hook (see traefik-logrotate.j2) to send SIGUSR1 without restarting Traefik.
+ExecStartPost=/bin/sh -c 'pgrep -f "{{ traefik_bin_dir }}/traefik" > /run/{{ traefik_service_name }}/{{ traefik_service_name }}.pid'
+PIDFile=/run/{{ traefik_service_name }}/{{ traefik_service_name }}.pid
+
+[Install]
+WantedBy=multi-user.target

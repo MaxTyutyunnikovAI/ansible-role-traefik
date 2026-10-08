@@ -1,87 +1,130 @@
 ---
-- name: Create traefik system group
+# ============================================================================
+# Install: system group/user, directory layout, Traefik v3 binary from GitHub.
+# Idempotency: the tar.gz is downloaded/unpacked only when the installed
+# binary is missing or reports a version different from traefik_version.
+# ============================================================================
+
+- name: Assert that the target uses systemd as init system
+  ansible.builtin.assert:
+    that: ansible_facts["service_mgr"] == "systemd"
+    fail_msg: "This role requires a systemd-based distribution."
+    quiet: true
+
+- name: Create Traefik system group
   ansible.builtin.group:
     name: "{{ traefik_system_group }}"
     state: present
     system: true
   when: traefik_system_group != "root"
 
-- name: Create traefik system user
+- name: Create Traefik system user
   ansible.builtin.user:
     name: "{{ traefik_system_user }}"
     group: "{{ traefik_system_group }}"
-    shell: /usr/sbin/nologin
+    shell: /usr/sbin/nologin          # no interactive login for the service account
     system: true
     create_home: false
+    home: "{{ traefik_data_dir }}"
+    state: present
   when: traefik_system_user != "root"
 
-- name: Ensure bin directory exists
+- name: Ensure Traefik directories exist with correct ownership and modes
   ansible.builtin.file:
-    path: "{{ traefik_bin_dir }}"
+    path: "{{ item.path }}"
     state: directory
-    owner: root
-    group: root
-    mode: "0755"
+    owner: "{{ item.owner | default(traefik_system_user) }}"
+    group: "{{ item.group | default(traefik_system_group) }}"
+    mode: "{{ item.mode | default(traefik_directory_mode) }}"
+  loop:
+    - path: "{{ traefik_bin_dir }}"
+      owner: root
+      group: root
+      mode: "0755"
+    - path: "{{ traefik_config_dir }}"
+      owner: "{{ traefik_config_owner }}"
+      group: "{{ traefik_config_group }}"
+    - path: "{{ traefik_dynamic_config_dir }}"
+      owner: "{{ traefik_config_owner }}"
+      group: "{{ traefik_config_group }}"
+    - path: "{{ traefik_log_dir }}"
+    - path: "{{ traefik_data_dir }}"
+  loop_control:
+    label: "{{ item.path }}"
 
-- name: Ensure log directory exists
-  ansible.builtin.file:
-    path: "{{ traefik_log_dir }}"
-    state: directory
-    owner: "{{ traefik_system_user }}"
-    group: "{{ traefik_system_group }}"
-    mode: "0750"
+- name: Check whether the Traefik binary is already present
+  ansible.builtin.stat:
+    path: "{{ traefik_bin_dir }}/traefik"
+  register: traefik_binary_stat
+  changed_when: false
+  check_mode: false
 
-- name: Install to target host
+- name: Get currently installed Traefik version
+  ansible.builtin.command:
+    argv:
+      - "{{ traefik_bin_dir }}/traefik"
+      - version
+  register: traefik_installed_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: traefik_binary_stat.stat.exists | bool
+
+# needs_install is True on first run or when the pinned version has changed.
+# NOTE: `traefik version` prints "Version:  3.6.2" WITHOUT the leading "v"
+# of the git tag, so we compare against the tag with the "v" stripped.
+- name: Determine if Traefik binary must be (re)installed
+  ansible.builtin.set_fact:
+    traefik_needs_install: >-
+      {{ not (traefik_binary_stat.stat.exists | bool)
+         or (traefik_version[1:] if traefik_version is match('^v') else traefik_version)
+            not in (traefik_installed_version.stdout | default('')) }}
+
+- name: Download and unpack Traefik release tarball from GitHub
+  when: traefik_needs_install | bool
   block:
-    - name: Create download directory
+    - name: Create temporary download directory
       ansible.builtin.file:
-        path: /tmp/traefik-bin/
+        path: "{{ traefik_download_tmp_dir }}"
         state: directory
+        owner: root
+        group: root
         mode: "0755"
-      when:
-        - not ansible_check_mode
 
-    - name: Download and unarchive traefik release binary
+    - name: Unarchive Traefik binary archive (remote_src, no same owner)
       ansible.builtin.unarchive:
-        src: "{{ traefik_repo_url }}/releases/download/{{ traefik_version }}/traefik_{{ traefik_version }}_linux_{{ go_arch }}.tar.gz"
-        dest: /tmp/traefik-bin/
+        src: "{{ traefik_binary_url }}"
+        dest: "{{ traefik_download_tmp_dir }}"
         remote_src: true
         extra_opts:
           - --no-same-owner
-      register: archive_download
-      when:
-        - not ansible_check_mode
-        - not traefik_is_installed.stat.exists or
-          traefik_version not in traefik_current_version.stdout
+        creates: "{{ traefik_download_tmp_dir }}/traefik"
 
-    - name: Copy treafik release binary
+    - name: Install Traefik binary into {{ traefik_bin_dir }}
       ansible.builtin.copy:
-        src: /tmp/traefik-bin/traefik
+        src: "{{ traefik_download_tmp_dir }}/traefik"
         dest: "{{ traefik_bin_dir }}/traefik"
-        mode: "0755"
         owner: root
-        group: "root"
+        group: root
+        mode: "0755"
         remote_src: true
-      when: archive_download is changed
-      notify: Restart Traefik service
+      # A binary upgrade by itself does NOT restart the proxy; any restart is
+      # always routed through the validate_and_restart_traefik handler chain.
 
-  always:
-    - name: Clear download file
+    - name: Remove temporary download directory
       ansible.builtin.file:
-        path: /tmp/traefik-bin/
+        path: "{{ traefik_download_tmp_dir }}"
         state: absent
-      when:
-        - not ansible_check_mode
 
-- name: Restore SELinux context for traefik binary
+- name: Restore SELinux context for the Traefik binary
   ansible.builtin.command:
     argv:
       - restorecon
       - -v
       - "{{ traefik_bin_dir }}/traefik"
-  register: restorecon_result
-  changed_when: "'relabeled' in restorecon_result.stdout"
+  register: traefik_restorecon
+  changed_when: "'relabeled' in traefik_restorecon.stdout"
   when:
-    - ansible_facts['selinux'] is defined
-    - ansible_facts['selinux'].status == "enabled"
+    - ansible_facts["selinux"] is defined
+    - ansible_facts["selinux"].status == "enabled"
     - not ansible_check_mode
