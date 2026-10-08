@@ -55,6 +55,12 @@ traefik_limit_nofile: 1048576
 traefik_extra_capabilities: []        # например ["CAP_NET_RAW"]
 traefik_extra_unit_vars: {}           # произвольные дополнительные ключи [Service]
 
+# Плагины Traefik v3 (trial-механизм + Traefik Pilot)
+traefik_pilot_enabled: false          # true -> блоки pilot/experimental.plugins + кэш плагинов
+traefik_pilot_token: ""               # TRIAL-токен с pilot.traefik.io (хранить в ansible-vault)
+traefik_plugins: []                   # [{name, version, moduleName}] — предзагрузка `traefik trial --download`
+traefik_plugins_dir: "/etc/traefik/plugins-trial"   # кэш исходников Yaegi-плагинов
+
 # Logrotate
 traefik_logrotate_enabled: true
 traefik_logrotate_frequency: "daily"
@@ -90,11 +96,11 @@ traefik_dynamic_configs:
       traefik_version: v3.6.2
 ```
 
-Готовые примеры подключения провайдеров (Docker, Kubernetes/k3s) — в
-каталоге [`docs/`](docs/README.md):
+Готовые примеры подключения провайдеров (Docker, Kubernetes/k3s) и установки
+плагинов — в каталоге [`docs/`](docs/README.md):
 
-* `docs/examples/playbook-docker-provider.yml` — Docker Provider + LABEL'ы контейнеров;
-* `docs/examples/playbook-k3s-provider.yml` — Kubernetes Provider на базе k3s (Ingress/IngressClass).
+* `docs/examples/playbook-docker-provider.yml` — Docker Provider + LABEL'ы контейнеров + плагин (`experimental.plugins`, `traefik trial --download`);
+* `docs/examples/playbook-k3s-provider.yml` — Kubernetes Provider на базе k3s (Ingress/IngressClass) + CRD-Middleware на плагине.
 
 Тестирование
 ------------

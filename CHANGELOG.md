@@ -7,6 +7,15 @@
 ## [Не выпущено]
 
 ### Добавлено
+- Установка **плагинов Traefik v3** (trial-механизм + Traefik Pilot): переменные
+  `traefik_pilot_enabled`, `traefik_pilot_token` (секрет — ansible-vault),
+  `traefik_plugins` (`[{name, version, moduleName}]`), `traefik_plugins_dir`,
+  `traefik_pilot_extra_props`; шаблон статики автоматически добавляет блоки
+  `pilot:` и `experimental.plugins:`, а `tasks/configure.yml` идемпотентно
+  предзагружает исходники плагинов через `traefik trial --download` в кэш
+  `traefik_plugins_dir` (повторная загрузка — только при отсутствии кэша или смене версии).
+  Закалённый юнит получает `ReadWritePaths={{ traefik_plugins_dir }}` при включённом pilot.
+  Примеры подключения плагинов — в обоих плейбуках `docs/examples/`.
 - Полная переработка роли под Traefik **v3** с декларативной конфигурацией.
 - Переменная `traefik_version` с закреплением релиза (по умолчанию `v3.6.2`) и идемпотентная
   установка бинарного файла: архив с GitHub Releases загружается и распаковывается только при

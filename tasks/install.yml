@@ -49,6 +49,10 @@
       group: "{{ traefik_config_group }}"
     - path: "{{ traefik_log_dir }}"
     - path: "{{ traefik_data_dir }}"
+    # Plugin cache dir (traefik trial downloads Yaegi sources here at startup);
+    # owned by the service user because the daemon must be able to write it.
+    - path: "{{ traefik_plugins_dir }}"
+      when: traefik_pilot_enabled | bool
   loop_control:
     label: "{{ item.path }}"
 

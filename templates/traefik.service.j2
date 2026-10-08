@@ -59,6 +59,11 @@ AmbientCapabilities={{ cap }}
 
 ReadWritePaths={{ traefik_log_dir }}
 ReadWritePaths={{ traefik_data_dir }}
+{% if traefik_pilot_enabled | bool %}
+# The daemon writes downloaded Yaegi plugin sources into the trial cache dir
+# at startup — ProtectSystem would otherwise make it read-only for the service.
+ReadWritePaths={{ traefik_plugins_dir }}
+{% endif %}
 
 # Free-form extra [Service] keys from traefik_extra_unit_vars (dict -> "Key=Value").
 {% for key, value in traefik_extra_unit_vars | dict2items %}

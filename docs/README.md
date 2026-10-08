@@ -16,15 +16,24 @@
 1. **Merge вместо переопределения.** Роль хранит статическую конфигурацию в
    декларативном словаре `traefik_static_config`. Чтобы добавить провайдер и
    не потерять дефолты (entryPoints, логи, api, file-provider), используется
-   рекурсивный `combine`:
+   рекурсивный `combine`. Базой merge служит **`traefik_role_defaults`** —
+   plain-копия дефолтов роли (`vars/main.yml`):
 
    ```yaml
    traefik_static_config: >-
-     {{ traefik_static_config
+     {{ traefik_role_defaults.traefik_static_config
         | combine({'providers':
-                     traefik_static_config.providers
+                     traefik_role_defaults.traefik_static_config.providers
                      | combine(docker_provider_opts)}, recursive=True) }}
    ```
+
+   > ⚠️ Нельзя писать `{{ traefik_static_config | combine(...) }}` внутри
+   > собственного определения `traefik_static_config` (в `roles:` или `vars:`):
+   > Ansible резолвит имя обратно в эту же переменную, возникает цикл
+   > подстановки и задача падает с
+   > `AnsibleError: ... maximum recursion depth exceeded while calling a
+   > Python object`. Именно поэтому база для merge вынесена в отдельную
+   > нешаблонную переменную `traefik_role_defaults`.
 
 2. **File Provider остаётся полезным** даже при активном docker/kubernetes
    провайдере: в `traefik_dynamic_configs` держат глобальные TLS-опции и
@@ -42,14 +51,31 @@
    `traefik_cert_resolvers`; для DNS-01 токены прокидываются через
    `traefik_envs` (ansible-vault), а не в конфиг-файл.
 
+5. **Плагины Traefik v3 (trial + Pilot).** Плагины — это Yaegi-скрипты, которые
+   Traefik скачивает с pilot.traefik.io; офлайн-«установки» пакета не существует.
+   Роль реализует установку целиком:
+   * `traefik_pilot_enabled: true` + `traefik_pilot_token` (хранить в ansible-vault) —
+     роль добавляет в статику блоки `pilot:` и `experimental.plugins:`;
+   * `traefik_plugins: [{name, version, moduleName}]` — роль идемпотентно
+     предзагружает исходники `traefik trial --download <name>@<version>` в кэш
+     `traefik_plugins_dir` (переатрибуция каталога + `ReadWritePaths` в юните);
+   * middleware на плагине объявляется в динамической конфигурации как
+     `<name>@plugin` (docker-пример) или через CRD `Middleware`
+     `traefik.io/v1alpha1` c аннотацией Ingress (k3s-пример).
+   Предзагрузка нужна, чтобы сбой pilot.traefik.io не блокировал запуск демона
+   (он подхватывает закэшированную копию); повторная загрузка происходит только
+   при отсутствии кэша или смене версии в `traefik_plugins`.
+
 Запуск
 ------
 
 ```bash
 # роль должна быть доступна как w0.traefik (galaxy-имя) либо укажите путь
 ansible-galaxy install w0.traefik          # или ANSIBLE_ROLES_PATH=../roles
-ansible-playbook -i inventory.ini docs/examples/playbook-docker-provider.yml
-ansible-playbook -i inventory.ini docs/examples/playbook-k3s-provider.yml
+# токен Pilot (для примеров с плагинами) — в vault:
+ansible-vault edit group_vars/traefik/vault.yml      # traefik_pilot_token_vault: "TRIAL-..."
+ansible-playbook -i inventory.ini --vault-id @prompt docs/examples/playbook-docker-provider.yml
+ansible-playbook -i inventory.ini --vault-id @prompt docs/examples/playbook-k3s-provider.yml
 ```
 
 Замечания по примерам

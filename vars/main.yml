@@ -1,4 +1,69 @@
 ---
+# ============================================================================
+# Internal role constants. Do not override from inventory/playbooks — the
+# `traefik_role_defaults` dict below is the SAFE base for merging extra
+# providers/plugins into the static config (see docs/examples). It must stay
+# a plain (non-templated) YAML mapping on purpose: if it contained Jinja2
+# expressions, referencing it from an override of `traefik_static_config`
+# could re-enter templating and blow the recursion limit. The nested
+# "{{ ... }}" placeholders are expanded later, when the merged dict is
+# finally templated by templates/traefik.yml.j2.
+# ============================================================================
+
+# Canonical copy of the default static configuration from defaults/main.yml.
+# Playbooks merge provider options into THIS dict instead of self-referencing
+# `traefik_static_config` inside its own definition (that creates a variable
+# resolution cycle -> "maximum recursion depth exceeded while calling a
+# Python object"). Example:
+#   vars:
+#     traefik_static_config: >-
+#       {{ traefik_role_defaults.traefik_static_config
+#          | combine({'providers':
+#                       traefik_role_defaults.traefik_static_config.providers
+#                       | combine(docker_provider_opts)}, recursive=True) }}
+traefik_role_defaults:
+  traefik_static_config:
+    global:
+      checkNewVersion: false
+      sendAnonymousUsage: false
+
+    entryPoints:
+      web:
+        address: ":80"
+        http:
+          redirections:
+            entryPoint:
+              to: websecure
+              scheme: https
+      websecure:
+        address: ":443"
+        http:
+          tls:
+            certResolver: letsencrypt
+
+    log:
+      level: INFO
+      format: json
+      filePath: "{{ traefik_log_dir }}/traefik.log"
+
+    accessLog:
+      format: json
+      filePath: "{{ traefik_log_dir }}/access.log"
+      fields:
+        headers:
+          defaultMode: drop
+          names:
+            User-Agent: keep
+
+    api:
+      dashboard: true
+      insecure: false
+
+    providers:
+      file:
+        directory: "{{ traefik_dynamic_config_dir }}"
+        watch: true
+
 go_arch_map:
   i386: "386"
   x86_64: "amd64"
