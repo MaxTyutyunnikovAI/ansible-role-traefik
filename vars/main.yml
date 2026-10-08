@@ -5,3 +5,14 @@ go_arch_map:
   aarch64: "arm64"
 
 go_arch: "{{ go_arch_map[ansible_facts['architecture']] | default(ansible_facts['architecture']) }}"
+
+# Default HTTP-01 resolver injected when traefik_enable_acme: true and no
+# explicit traefik_cert_resolvers were provided (see templates/traefik.yml.j2).
+traefik_default_acme_resolver:
+  letsencrypt:
+    acme:
+      email: "{{ traefik_acme_email | default('root@localhost') }}"
+      storage: "{{ traefik_data_dir }}/acme.json"
+      caServer: "https://acme-v02.api.letsencrypt.org/directory"
+      httpChallenge:
+        entryPoint: web

@@ -99,6 +99,9 @@
         extra_opts:
           - --no-same-owner
         creates: "{{ traefik_download_tmp_dir }}/traefik"
+        # Opt-in integrity check: set traefik_binary_checksum ("sha256:<hex>")
+        # when pinning a new version (value from the GitHub release checksums).
+        checksum: "{{ traefik_binary_checksum | default('') | ternary(traefik_binary_checksum, omit) }}"
 
     - name: Install Traefik binary into {{ traefik_bin_dir }}
       ansible.builtin.copy:
