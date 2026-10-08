@@ -9,7 +9,8 @@
 
 ## Средний приоритет
 - [ ] Реализовать применение переменной `traefik_extra_unit_vars` в шаблоне `traefik.service.j2` (переменная объявлена в defaults, но пока не используется).
-- [ ] Поддержка Docker/Kubernetes provider'ов через дополнительные переменные роли.
+- [x] Поддержка Docker/Kubernetes provider'ов — через документированные примеры merge в `traefik_static_config` (`docs/examples/`).
+- [x] Установка плагинов Traefik v3 (pilot + experimental.plugins + предзагрузка `traefik trial --download`).
 - [ ] Опциональная настройка middleware по умолчанию (compress, headers, rate-limit) в динамической конфигурации.
 - [ ] Документировать схему миграции с предыдущих версий роли (изменения структуры переменных) в README.
 

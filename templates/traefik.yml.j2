@@ -13,7 +13,27 @@
 {% set _resolvers = traefik_cert_resolvers
                     if (traefik_cert_resolvers | length > 0)
                     else (traefik_default_acme_resolver if (traefik_enable_acme | bool) else {}) %}
-{% set _static = traefik_static_config | combine(
+{#- Pilot & plugins: the `pilot` static block is what makes the daemon fetch /
+    refresh Yaegi plugin sources from pilot.traefik.io at startup; every plugin
+    used by a middleware MUST also be declared under `experimental.plugins`.
+    The token is rendered into the config file (mode 0640, service owner) and
+    consumed by both the daemon and the `traefik trial --download` pre-fetch. -#}
+{%- set _plugins_dict = {} %}
+{%- for _p in traefik_plugins %}
+{%-   set _plugins_dict = _plugins_dict | combine({
+          _p.name: {'moduleName': _p.moduleName, 'version': _p.version}
+      }) %}
+{%- endfor %}
+{% set _static = traefik_static_config
+                 | combine(
+                     {'pilot': dict({'token': traefik_pilot_token}, traefik_pilot_extra_props)}
+                     if (traefik_pilot_enabled | bool and traefik_pilot_token | length > 0) else {}
+                   )
+                 | combine(
+                     {'experimental': {'plugins': _plugins_dict}}
+                     if (traefik_pilot_enabled | bool and traefik_plugins | length > 0) else {}
+                   )
+                 | combine(
        {'certificatesResolvers': _resolvers} if (_resolvers | length > 0) else {}
    ) %}
 {{ _static | to_nice_yaml(indent=2) }}

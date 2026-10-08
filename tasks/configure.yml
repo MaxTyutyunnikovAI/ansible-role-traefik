@@ -19,6 +19,34 @@
     # notify) before any restart — that is the authoritative gate.
   notify: validate_and_restart_traefik
 
+# --- Traefik v3 plugins (trial mechanism) -------------------------------------
+# Plugins are interpreted (Yaegi) scripts served by pilot.traefik.io; there is
+# no offline package. `traefik trial --download` pre-fetches them into
+# traefik_plugins_dir so a pilot outage never blocks startup (the daemon then
+# loads the cached copy). Runs AFTER the binary install task and BEFORE the
+# unit is started (systemd.yml), because the daemon downloads plugins itself
+# only when its config already declares them under experimental.plugins.
+# Idempotency: re-download only when the cached <name>@<version>.go file is
+# missing — i.e. on first install or after a version bump in traefik_plugins.
+- name: Download Traefik plugins into the trial cache (traefik trial --download)
+  ansible.builtin.command:
+    argv:
+      - "{{ traefik_bin_dir }}/traefik"
+      - trial
+      - "--setup={{ traefik_pilot_token }}"     # TRIAL- token, keep it in ansible-vault
+      - "--download={{ item.name }}@{{ item.version }}"
+    chdir: "{{ traefik_config_dir }}"           # pilot writes ./pilot.yml next to CWD
+  loop: "{{ traefik_plugins }}"
+  loop_control:
+    label: "{{ item.name }}@{{ item.version }}"
+  creates: "{{ traefik_plugins_dir }}/{{ item.name }}@{{ item.version }}.go"
+  no_log: true                                  # the token appears in argv
+  changed_when: true                            # "skipped (creates)" stays quiet; real fetch = change
+  when:
+    - traefik_pilot_enabled | bool
+    - traefik_plugins | length > 0
+    - not ansible_check_mode                    # the binary may not exist yet in check mode
+
 - name: Render dynamic configuration files (File Provider) from traefik_dynamic_configs
   ansible.builtin.copy:
     # Each item.content dict is serialized declaratively with to_nice_yaml.

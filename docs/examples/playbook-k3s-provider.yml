@@ -47,6 +47,16 @@
               default:
                 minVersion: VersionTLS12
                 sniStrict: false           # SNI strict может ломать health-check'и LB
+      # Плагины подключаются динамической конфигурацией: middleware вида
+      # "<name>@plugin", где <name> — ключ из experimental.plugins. В k8s на
+      # него также можно ссылаться через CRD Middleware (traefik.io/v1alpha1).
+      - name: plugin-middlewares
+        content:
+          http:
+            middlewares:
+              keep-response-body:
+                plugin:
+                  geohamster-keep: {}      # настройки плагина (см. README модуля)
 
     traefik_enable_acme: true
     traefik_cert_resolvers:
@@ -56,6 +66,22 @@
           storage: "{{ traefik_data_dir }}/acme.json"
           httpChallenge:
             entryPoint: web
+
+    # ------------------------------------------------------------------
+    # Плагины Traefik v3 (механизм trial + Traefik Pilot).
+    # Плагин = Yaegi-скрипт с pilot.traefik.io; «установка» — это:
+    #   1) блок pilot + experimental.plugins в статике (делает роль),
+    #   2) предзагрузка исходников `traefik trial --download` (таска configure.yml),
+    #   3) middleware, использующий плагин (<name>@plugin в динамической конфиге).
+    # Токен — секрет: ansible-vault edit group_vars/k3s_servers/vault.yml
+    #   traefik_pilot_token_vault: "TRIAL-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    # ------------------------------------------------------------------
+    traefik_pilot_enabled: true
+    traefik_pilot_token: "{{ traefik_pilot_token_vault | default('') }}"
+    traefik_plugins:
+      - name: geohamster-keep
+        version: v0.1.0
+        moduleName: github.com/geohamster/traefik-plugin
 
   tasks:
     # ------------------------------------------------------------------
@@ -137,10 +163,15 @@
       ansible.builtin.include_role:
         name: w0.traefik
       vars:
+        # ВАЖНО: базой merge служит traefik_role_defaults.traefik_static_config
+        # (plain-копия дефолтов роли из vars/main.yml), а НЕ сама переменная
+        # traefik_static_config — ссылка на собственное определение создаёт
+        # цикл резолва переменных и падает с "maximum recursion depth
+        # exceeded while calling a Python object".
         traefik_static_config: >-
-          {{ traefik_static_config
+          {{ traefik_role_defaults.traefik_static_config
              | combine({'providers':
-                          traefik_static_config.providers
+                          traefik_role_defaults.traefik_static_config.providers
                           | combine({'kubernetesprovider':
                                        k8s_provider_opts
                                        | combine({'kubeconfig': traefik_config_dir ~ '/k3s.kubeconfig'})
@@ -165,6 +196,37 @@
     - name: Apply IngressClass
       ansible.builtin.command: k3s kubectl apply -f /tmp/traefik-ingressclass.yml
       changed_when: false
+
+    # CRD Traefik (IngressRoute/Middleware) ставит сам kubernetesprovider при
+    # первом подключении к API — ждём, затем объявляем demo-Middleware на плагине.
+    - name: Wait for Traefik CRDs to be registered by the provider
+      ansible.builtin.command: k3s kubectl wait --for condition=established --timeout=120s \
+        crd/middlewares.traefik.io
+      register: _crd_wait
+      changed_when: false
+      retries: 5
+      delay: 5
+      until: _crd_wait.rc == 0
+
+    - name: Deploy demo plugin Middleware (CRD traefik.io/v1alpha1)
+      ansible.builtin.copy:
+        dest: /tmp/whoami-middleware.yml
+        mode: "0644"
+        content: |
+          apiVersion: traefik.io/v1alpha1
+          kind: Middleware
+          metadata:
+            name: keep-response-body
+            namespace: default
+          spec:
+            plugin:
+              geohamster-keep: {}
+      changed_when: false
+
+    - name: Apply demo plugin Middleware
+      ansible.builtin.command: k3s kubectl apply -f /tmp/whoami-middleware.yml
+      register: _mw_apply
+      changed_when: "'configured' in _mw_apply.stdout or 'created' in _mw_apply.stdout"
 
     - name: Deploy demo whoami app behind Traefik via Ingress
       ansible.builtin.copy:
@@ -206,6 +268,10 @@
             annotations:
               kubernetes.io/ingress.class: traefik
               traefik.frontend.entryPoints: websecure
+              # demo-Middleware на плагине, объявленном ниже через CRD Middleware
+              # (Ingress v3 синтаксис: "<namespace>/<name>"); тот же плагин из
+              # file provider доступен как "keep-response-body@file".
+              traefik.ingress.traefik.io.router.middlewares: "default/keep-response-body"
           spec:
             ingressClassName: traefik
             rules:

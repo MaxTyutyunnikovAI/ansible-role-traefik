@@ -23,6 +23,10 @@ traefik_static_config_file: "{{ traefik_config_dir }}/traefik.yml"
 traefik_dynamic_config_dir: "{{ traefik_config_dir }}/conf.d"   # File Provider directory
 traefik_log_dir: "/var/log/traefik"
 traefik_data_dir: "/var/lib/traefik"           # acme.json, runtime state
+# Catalog for Traefik Yaegi plugins downloaded by the "traefik trial" mechanism
+# (pilot.traefik.io). Must be writable by the service user — added to the unit's
+# ReadWritePaths automatically when traefik_pilot_enabled is true.
+traefik_plugins_dir: "{{ traefik_config_dir }}/plugins-trial"
 
 # Ownership / modes ----------------------------------------------------------
 traefik_config_owner: "{{ traefik_system_user }}"
@@ -53,6 +57,16 @@ traefik_logrotate_maxsize: "100M"
 # ----------------------------------------------------------------------------
 # STATIC CONFIGURATION (declarative dict -> rendered with to_nice_yaml(indent=2))
 # Entry points web/websecure, logging, accessLog, api dashboard, file provider.
+#
+# IMPORTANT — extending the config from playbooks/inventory: NEVER define an
+# override of `traefik_static_config` that references `traefik_static_config`
+# itself (e.g. `{{ traefik_static_config | combine(...) }}` in role vars or in
+# the same vars scope). Jinja2 resolves the name back into this very
+# definition, producing a variable-resolution cycle that ends with
+# "maximum recursion depth exceeded while calling a Python object".
+# Merge into the canonical plain-data copy instead:
+#   traefik_role_defaults.traefik_static_config  (defined in vars/main.yml)
+# Keep the two dicts in sync when changing the defaults below.
 # ----------------------------------------------------------------------------
 traefik_static_config:
   global:
@@ -137,6 +151,28 @@ traefik_cert_resolvers: {}
 #         dnsChallenge:
 #           provider: cloudflare
 #           delayBeforeCheck: 10
+
+# ----------------------------------------------------------------------------
+# TRAEFIK PILOT & PLUGINS (trial mechanism)
+# Traefik v3 plugins are Yaegi scripts fetched at startup by the `traefik trial`
+# command from pilot.traefik.io — there is no offline "install" step, so plugin
+# installation = (1) enabling pilot in the static config, (2) running
+# `traefik trial --download <name>@<version>` to pre-fetch sources into
+# traefik_plugins_dir, (3) declaring each plugin under `experimental.plugins`
+# so the daemon loads the cached copy on every start.
+# The TRIAL token is a secret: pass it via traefik_envs (ansible-vault), never
+# in the world-visible static config file.
+# ----------------------------------------------------------------------------
+traefik_pilot_enabled: false                   # true -> pilot block + plugins dir + ReadWritePaths
+traefik_pilot_token: ""                        # TRIAL token (pilot.traefik.io); keep it in ansible-vault
+traefik_pilot_extra_props: {}                  # e.g. {onerror: ignore} — unknown modules won't stop startup
+# Plugins to install: [{name, version, moduleName}] — name usually "<author><plugin>".
+traefik_plugins: []
+# Example:
+#   traefik_plugins:
+#     - name: geohamster-keep
+#       version: v0.1.0
+#       moduleName: github.com/geohamster/traefik-plugin
 
 # ----------------------------------------------------------------------------
 # DYNAMIC CONFIGURATION (File Provider). Each list item is rendered as a

@@ -79,7 +79,28 @@ Traefik нативно переоткрывает лог-файлы по `SIGUSR
 - **Molecule на RockyLinux 9**: systemd в контейнере требует privileged + tmpfs /run +
   монтирование cgroup; минимальная подготовка хоста (tar/gzip/procps-ng/logrotate) — в pre_tasks.
 
-## 9. Что можно улучшить (см. TODO.md)
+## 9. Плагины Traefik v3: pilot + предзагрузка trial-кэша
+**Решение**: установка плагина в роли — это три связанных шага: (1) статический блок
+`pilot:` (token + доп. свойства из `traefik_pilot_extra_props`) и `experimental.plugins:`
+(`<name>: {moduleName, version}`), которые шаблон `traefik.yml.j2` генерирует из
+`traefik_pilot_enabled` / `traefik_plugins`; (2) идемпотентная предзагрузка исходников
+`traefik trial --download <name>@<version>` (`tasks/configure.yml`, `creates:` на файл
+кэша `<name>@<version>.go`); (3) middleware, ссылающийся на плагин (`<name>@plugin` в file
+provider или CRD Middleware в k8s).
+
+**Почему**: у Traefik v3 нет офлайн-установки плагинов — демона можно «накормить» только
+через pilot.traefik.io. Предзагрузка в `traefik_plugins_dir` гарантирует, что сбой/отсутствие
+доступа к pilot не блокирует запуск (daemon использует закэшированную копию), а `creates:`
+делает задачу идемпотентной: повторная загрузка — только при чистом кэше или смене версии.
+Токен попадает в траекторию командной строки задачи, поэтому `no_log: true`; сам конфиг-файл
+имеет режим 0640 и принадлежит сервисному пользователю. При включённом pilot юнит получает
+`ReadWritePaths={{ traefik_plugins_dir }}` — иначе `ProtectSystem` запретит daemon'у писать кэш.
+
+**Альтернативы (отклонены)**: отдельная роль/плейбук для плагинов (дублирование логики
+статической конфигурации); скачивание через `get_url` с GitHub (не соответствует контрактной
+механике trial и формату кэша daemon'а).
+
+## 10. Что можно улучшить (см. TODO.md)
 - Настроить `certificatesResolvers` для letsencrypt (сейчас указан, но не определён).
 - Использовать объявленную, но не применяемую в шаблоне юнита переменную `traefik_extra_unit_vars`.
 - Расширить verify-тесты Molecule (прослушивание портов, ротация логов).

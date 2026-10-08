@@ -43,6 +43,15 @@
               default:
                 minVersion: VersionTLS12
                 sniStrict: true
+      # Плагины подключаются динамической конфигурацией: middleware вида
+      # "<name>@plugin", где <name> — ключ из experimental.plugins.
+      - name: plugin-middlewares
+        content:
+          http:
+            middlewares:
+              keep-response-body:
+                plugin:
+                  geohamster-keep: {}           # настройки плагина (см. README модуля)
       - name: default-middlewares
         content:
           http:
@@ -67,6 +76,22 @@
           httpChallenge:
             entryPoint: web
 
+    # ------------------------------------------------------------------
+    # Плагины Traefik v3 (механизм trial + Traefik Pilot).
+    # Плагин = Yaegi-скрипт с pilot.traefik.io; «установка» — это:
+    #   1) блок pilot + experimental.plugins в статике (делает роль),
+    #   2) предзагрузка исходников `traefik trial --download` (таска configure.yml),
+    #   3) middleware, использующий плагин (<name>@plugin в динамической конфиге).
+    # Токен — секрет: ansible-vault edit group_vars/traefik/vault.yml
+    #   traefik_pilot_token_vault: "TRIAL-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    # ------------------------------------------------------------------
+    traefik_pilot_enabled: true
+    traefik_pilot_token: "{{ traefik_pilot_token_vault | default('') }}"
+    traefik_plugins:
+      - name: geohamster-keep
+        version: v0.1.0
+        moduleName: github.com/geohamster/traefik-plugin
+
   pre_tasks:
     # Сервис-юнит Traefik должен попадать в docker-сеть вместе с бэкендами:
     # создаём сеть `proxy` (bridge) идемпотентно, до применения роли.
@@ -82,13 +107,16 @@
   roles:
     - role: w0.traefik
       # Merge docker-провайдера в providers, НЕ переписывая defaults целиком.
-      # В блоке roles переменная с тем же именем, что и в defaults роли,
-      # имеет приоритет над default-level значением — рекурсивный combine
-      # сохраняет остальные ключи (global, entryPoints, log, api, file…).
+      # ВАЖНО: базой служит traefik_role_defaults.traefik_static_config
+      # (plain-копия дефолтов роли из vars/main.yml), а НЕ сама переменная
+      # traefik_static_config — ссылка на собственное определение создаёт
+      # цикл резолва переменных и падает с "maximum recursion depth
+      # exceeded". Рекурсивный combine сохраняет остальные ключи
+      # (global, entryPoints, log, api, file…).
       traefik_static_config: >-
-        {{ traefik_static_config
+        {{ traefik_role_defaults.traefik_static_config
            | combine({'providers':
-                        traefik_static_config.providers
+                        traefik_role_defaults.traefik_static_config.providers
                         | combine(docker_provider_opts)}, recursive=True) }}
       # Закалённый юнит роли делает / только часть ФС доступной для записи и
       # ограничивает capabilities; для чтения docker.sock достаточно:
@@ -135,7 +163,7 @@
           traefik.http.routers.whoami.rule: "Host(`whoami.example.com`)"
           traefik.http.routers.whoami.entrypoints: "websecure"
           traefik.http.routers.whoami.tls.certresolver: "letsencrypt"
-          traefik.http.routers.whoami.middlewares: "security-headers@file,https-redirect@file"
+          traefik.http.routers.whoami.middlewares: "security-headers@file,https-redirect@file,keep-response-body@plugin"
           traefik.http.services.whoami.loadbalancer.server.port: "80"
 
     # Проверка: API включён (api.dashboard=true), но insecure=false —
