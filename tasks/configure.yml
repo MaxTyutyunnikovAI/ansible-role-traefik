@@ -1,47 +1,41 @@
 ---
-- name: Configure Traefik
-  block:
-    - name: Check traefik.yml already exists
-      ansible.builtin.stat:
-        path: /etc/traefik/traefik.yml
-      register: traefikconfig_state
+# ============================================================================
+# Configure: declarative static config (dict -> to_nice_yaml) + File Provider
+# dynamic configs rendered via a loop over traefik_dynamic_configs.
+# Every config change notifies the validated-restart handler chain — the
+# service is restarted ONLY if `traefik --check` passes (see handlers).
+# ============================================================================
 
-    - name: Ensure Traefik conf directory exists
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-      loop:
-        - /etc/traefik
-        - /etc/traefik/conf.d
-      when: not traefikconfig_state.stat.exists
-
-    - name: Copy default Traefik config
-      ansible.builtin.template:
-        src: traefik.j2
-        dest: "/etc/traefik/traefik.yml"
-        owner: traefik
-        group: traefik
-        mode: "0600"
-      when: not traefikconfig_state.stat.exists
-      notify: Restart Traefik service
-
-- name: Copy Traefik systemd unit file
+- name: Generate static Traefik configuration from traefik_static_config dict
   ansible.builtin.template:
-    src: service.j2
-    dest: "/etc/systemd/system/{{ traefik_service_name }}.service"
-    owner: root
-    group: root
-    mode: "0644"
+    src: traefik.yml.j2
+    dest: "{{ traefik_static_config_file }}"
+    owner: "{{ traefik_config_owner }}"
+    group: "{{ traefik_config_group }}"
+    mode: "{{ traefik_config_mode }}"
+    # No inline `validate:` here: `traefik --check` binds entrypoint sockets,
+    # which would make temp-file validation hang/conflict with the running
+    # instance. The final file is validated in the handler chain (below the
+    # notify) before any restart — that is the authoritative gate.
+  notify: validate_and_restart_traefik
 
-- name: Daemon-reload Traefik service
-  ansible.builtin.systemd:
-    daemon_reload: true
-    name: "{{ traefik_service_name }}"
+- name: Render dynamic configuration files (File Provider) from traefik_dynamic_configs
+  ansible.builtin.copy:
+    # Each item.content dict is serialized declaratively with to_nice_yaml.
+    content: "{{ item.content | to_nice_yaml(indent=2) }}"
+    dest: "{{ traefik_dynamic_config_dir }}/{{ item.name }}.yml"
+    owner: "{{ traefik_config_owner }}"
+    group: "{{ traefik_config_group }}"
+    mode: "{{ traefik_config_mode }}"
+  loop: "{{ traefik_dynamic_configs }}"
+  loop_control:
+    label: "{{ traefik_dynamic_config_dir }}/{{ item.name }}.yml"
+  notify: validate_and_restart_traefik
 
-- name: Enable Treafik service on boot
-  ansible.builtin.systemd:
-    name: "{{ traefik_service_name }}"
-    enabled: true
+# NOTE ON DYNAMIC CONFIG VALIDATION (verified empirically with Traefik v3):
+# `traefik --configFile=<file> --check` validates ONLY static configuration and
+# binds entrypoint sockets while checking. File Provider dynamic resources are
+# loaded at runtime (providers.file.watch=true applies them without a restart),
+# and TLS options are resolved only during an actual handshake — so there is no
+# safe offline schema-validation for them. The authoritative gate before any
+# restart is the static-config validation performed in the handler chain.

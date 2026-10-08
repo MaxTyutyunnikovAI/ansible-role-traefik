@@ -1,0 +1,66 @@
+---
+# Molecule scenario: docker driver, RockyLinux 9 (systemd-based target).
+role_name_check: 1
+
+dependency:
+  name: galaxy
+
+driver:
+  name: docker
+
+platforms:
+  - name: instance
+    image: rockylinux/rockylinux:9
+    # systemd needs privileged mode + cgroup delegation inside docker
+    privileged: true
+    command: /sbin/init
+    tmpfs:
+      - /run
+      - /tmp
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    capabilities:
+      - SYS_ADMIN
+    groups:
+      - traefik_servers
+
+provisioner:
+  name: ansible
+  playbooks:
+    converge: converge.yml
+  inventory:
+    group_vars:
+      traefik_servers:
+        traefik_version: v3.6.2
+        traefik_static_config:
+          entryPoints:
+            web:
+              address: ":80"
+            websecure:
+              address: ":443"
+          log:
+            level: INFO
+          api:
+            dashboard: false
+            insecure: false
+          providers:
+            file:
+              directory: /etc/traefik/conf.d
+              watch: true
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - cleanup
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - check
+    - verify
+    - destroy

@@ -1,0 +1,9 @@
+{#-
+    Static Traefik v3 configuration.
+    Fully declarative: the whole file is a dump of the traefik_static_config
+    dictionary rendered via the to_nice_yaml(indent=2) filter, so overrides
+    from inventory/group_vars behave predictably (dict merge/replace).
+-#}
+# {{ ansible_managed }}
+# Generated from the "traefik_static_config" dictionary — do not edit by hand.
+{{ traefik_static_config | to_nice_yaml(indent=2) }}

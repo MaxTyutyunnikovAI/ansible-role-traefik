@@ -1,10 +1,112 @@
 ---
-traefik_version: "v3.7.11"
-traefik_service_name: "traefik"
+# ============================================================================
+# Traefik v3 role — defaults (all values overridable from inventory/vars)
+# ============================================================================
 
+# Version & download -------------------------------------------------------
+traefik_version: "v3.6.2"                      # pinned v3.x release tag
 traefik_repo_url: "https://github.com/traefik/traefik"
+traefik_binary_url: "{{ traefik_repo_url }}/releases/download/{{ traefik_version }}/traefik_{{ traefik_version }}_linux_{{ go_arch }}.tar.gz"
+traefik_download_tmp_dir: "/tmp/traefik-download"
 
+# Users / paths ------------------------------------------------------------
+traefik_service_name: "traefik"
 traefik_system_user: "traefik"
 traefik_system_group: "traefik"
 traefik_bin_dir: "/usr/local/bin"
+traefik_config_dir: "/etc/traefik"
+traefik_static_config_file: "{{ traefik_config_dir }}/traefik.yml"
+traefik_dynamic_config_dir: "{{ traefik_config_dir }}/conf.d"   # File Provider directory
 traefik_log_dir: "/var/log/traefik"
+traefik_data_dir: "/var/lib/traefik"           # acme.json, runtime state
+
+# Ownership / modes ----------------------------------------------------------
+traefik_config_owner: "{{ traefik_system_user }}"
+traefik_config_group: "{{ traefik_system_group }}"
+traefik_config_mode: "0640"
+traefik_directory_mode: "0750"
+
+# Systemd unit knobs ---------------------------------------------------------
+traefik_start_timeout: 30                      # StartSec in seconds
+traefik_restart_sec: 5                         # RestartSec in seconds
+traefik_limit_nofile: 1048576
+traefik_extra_capabilities: []                 # e.g. ["CAP_NET_RAW"]
+traefik_extra_unit_vars: {}                    # free-form extra [Service] keys
+
+# Logrotate ------------------------------------------------------------------
+traefik_logrotate_enabled: true
+traefik_logrotate_frequency: "daily"
+traefik_logrotate_rotate: 14
+traefik_logrotate_maxsize: "100M"
+
+# ----------------------------------------------------------------------------
+# STATIC CONFIGURATION (declarative dict -> rendered with to_nice_yaml(indent=2))
+# Entry points web/websecure, logging, accessLog, api dashboard, file provider.
+# ----------------------------------------------------------------------------
+traefik_static_config:
+  global:
+    checkNewVersion: false
+    sendAnonymousUsage: false
+
+  entryPoints:
+    web:
+      address: ":80"
+      http:
+        redirections:
+          entryPoint:
+            to: websecure
+            scheme: https
+    websecure:
+      address: ":443"
+      http:
+        tls:
+          certResolver: letsencrypt
+
+  log:
+    level: INFO
+    format: json
+    filePath: "{{ traefik_log_dir }}/traefik.log"
+
+  accessLog:
+    format: json
+    filePath: "{{ traefik_log_dir }}/access.log"
+    fields:
+      headers:
+        defaultMode: drop
+        names:
+          User-Agent: keep
+
+  api:
+    dashboard: true
+    insecure: false
+
+  providers:
+    file:
+      directory: "{{ traefik_dynamic_config_dir }}"
+      watch: true
+
+# ----------------------------------------------------------------------------
+# DYNAMIC CONFIGURATION (File Provider). Each list item is rendered as a
+# separate YAML file into traefik_dynamic_config_dir via a loop in configure.yml
+# ----------------------------------------------------------------------------
+traefik_dynamic_configs:
+  - name: tls-options
+    content:
+      tls:
+        options:
+          default:
+            minVersion: VersionTLS12
+            sniStrict: true
+            cipherSuites:
+              - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+              - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+              - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+              - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+            curvePreferences:
+              - CurveP521
+              - CurveP384
+  # Example of an additional dynamic file (routers/services) can be added here:
+  # - name: shared-routers
+  #   content:
+  #     http:
+  #       routers: ...
