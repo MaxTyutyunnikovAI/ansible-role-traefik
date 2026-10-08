@@ -1,0 +1,10 @@
+---
+# Galaxy dependencies for the w0.traefik role.
+# Consumed by the Molecule 'galaxy' dependency step (molecule/default/
+# molecule.yml -> dependency.name: galaxy) and by CI lint/test jobs:
+#   ansible-galaxy install -r requirements.yml
+#   ansible.posix     — SELinux modules used when SELinux is enabled.
+#   community.general — generic helpers used by test/verify playbooks.
+collections:
+  - name: ansible.posix
+  - name: community.general
