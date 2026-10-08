@@ -1,0 +1,24 @@
+---
+namespace: w0
+name: traefik
+version: "1.0.0"
+readme: README.md
+authors:
+  - w0
+description: Install Traefik v3 as a hardened systemd service with declarative configuration.
+license:
+  - Apache-2.0
+tags:
+  - infrastructure
+  - traefik
+  - reverseproxy
+  - loadbalancer
+  - proxy
+  - web
+  - http
+  - https
+  - systemd
+dependencies: {}
+repository: https://github.com/w0/traefik
+documentation: https://github.com/w0/traefik/blob/main/README.md
+issues: https://github.com/w0/traefik/issues

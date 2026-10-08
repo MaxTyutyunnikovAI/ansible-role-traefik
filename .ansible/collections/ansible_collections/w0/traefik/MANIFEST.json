@@ -1,0 +1,40 @@
+{
+ "collection_info": {
+  "namespace": "w0",
+  "name": "traefik",
+  "version": "1.0.0",
+  "authors": [
+   "w0"
+  ],
+  "readme": "README.md",
+  "tags": [
+   "infrastructure",
+   "traefik",
+   "reverseproxy",
+   "loadbalancer",
+   "proxy",
+   "web",
+   "http",
+   "https",
+   "systemd"
+  ],
+  "description": "Install Traefik v3 as a hardened systemd service with declarative configuration.",
+  "license": [
+   "Apache-2.0"
+  ],
+  "license_file": null,
+  "dependencies": {},
+  "repository": "https://github.com/w0/traefik",
+  "documentation": "https://github.com/w0/traefik/blob/main/README.md",
+  "homepage": null,
+  "issues": "https://github.com/w0/traefik/issues"
+ },
+ "file_manifest_file": {
+  "name": "FILES.json",
+  "ftype": "file",
+  "chksum_type": "sha256",
+  "chksum_sha256": "d93cdbb46bcf0904f6933d0843164494b3c286db4ae6bb2858329566db8a1c2d",
+  "format": 1
+ },
+ "format": 1
+}

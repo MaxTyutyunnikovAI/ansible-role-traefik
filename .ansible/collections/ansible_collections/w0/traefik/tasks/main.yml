@@ -1,0 +1,19 @@
+---
+# ============================================================================
+# Traefik v3 role — entry point.
+# Modular structure: install -> configure -> systemd -> logrotate.
+# include_tasks (dynamic) keeps each module independently readable/testable.
+# ============================================================================
+
+- name: Include installation tasks (group, user, dirs, binary)
+  ansible.builtin.include_tasks: install.yml
+
+- name: Include configuration tasks (static + dynamic configs)
+  ansible.builtin.include_tasks: configure.yml
+
+- name: Include systemd tasks (hardened unit, enable service)
+  ansible.builtin.include_tasks: systemd.yml
+
+- name: Include logrotate tasks
+  ansible.builtin.include_tasks: logrotate.yml
+  when: traefik_logrotate_enabled | bool

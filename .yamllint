@@ -1,0 +1,24 @@
+---
+extends: default
+
+rules:
+  line-length:
+    max: 160
+    level: warning
+  # Keep compatible with ansible-lint's expectations (see docs for yaml rule):
+  # these must stay disabled/aligned or ansible-lint falls back to its own config.
+  comments-indentation: false
+  braces:
+    max-spaces-inside: 1
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true
+  truthy:
+    allowed-values: ['true', 'false']
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+
+ignore: |
+  .ansible/
+  molecule/*/instance/

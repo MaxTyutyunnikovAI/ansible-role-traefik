@@ -1,0 +1,34 @@
+---
+# ============================================================================
+# Handler chain bound to the listen topic "validate_and_restart_traefik":
+#   1) Run `traefik --configFile=... --check=true` — a dry validation run
+#      (--check alone is parsed as a flag needing an argument in v3).
+#      If it fails, the play aborts and Traefik is NEVER restarted with a
+#      broken config (fail-fast, production-safe).
+#   2) Only when validation succeeded -> restart the service.
+# Handlers within one notification run in declaration order; the `when` guard
+# on step 2 makes the ordering dependency explicit and safe.
+# ============================================================================
+
+- name: Validate Traefik static configuration before restart
+  ansible.builtin.command:
+    argv:
+      - "{{ traefik_bin_dir }}/traefik"
+      - "--configFile={{ traefik_static_config_file }}"
+      - "--check=true"
+  changed_when: false            # validation is a read-only check, never "changed"
+  check_mode: false              # must really execute even under --check
+  listen: validate_and_restart_traefik
+  register: traefik_config_check
+
+- name: Restart Traefik service after successful validation
+  ansible.builtin.systemd:
+    name: "{{ traefik_service_name }}"
+    state: restarted
+  listen: validate_and_restart_traefik
+  when: traefik_config_check.rc == 0
+
+- name: Reload systemd daemon for Traefik
+  ansible.builtin.systemd:
+    daemon_reload: true
+  listen: Reload systemd daemon for Traefik

@@ -1,0 +1,59 @@
+---
+# Post-converge assertions: the service must be active, listening on :80/:443,
+# serving the static config we declared, and logrotate/PID plumbing intact.
+- name: Verify Traefik deployment
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Check Traefik service state
+      ansible.builtin.systemd:
+        name: traefik
+      register: traefik_service
+      failed_when: not traefik_service.status.ActiveState == "active"
+
+    - name: Read installed binary version
+      ansible.builtin.command: /usr/local/bin/traefik version
+      register: traefik_version_out
+      changed_when: false
+
+    - name: Assert pinned version is installed
+      ansible.builtin.assert:
+        that: "'3.6.2' in traefik_version_out.stdout"
+        fail_msg: "Unexpected Traefik version: {{ traefik_version_out.stdout }}"
+
+    - name: Assert entry points are listening (:80 and :443)
+      ansible.builtin.wait_for:
+        port: "{{ item }}"
+        host: 127.0.0.1
+        timeout: 30
+      loop: [80, 443]
+
+    - name: Assert static config file exists and is mode 0640
+      ansible.builtin.stat:
+        path: /etc/traefik/traefik.yml
+      register: traefik_static_file
+      failed_when: not (traefik_static_file.stat.exists and traefik_static_file.stat.mode == '0640')
+
+    - name: Assert dynamic tls-options file exists
+      ansible.builtin.stat:
+        path: /etc/traefik/conf.d/tls-options.yml
+      register: traefik_dynamic_file
+      failed_when: not traefik_dynamic_file.stat.exists
+
+    - name: Assert runtime directory is managed by systemd
+      ansible.builtin.stat:
+        path: /run/traefik
+      register: traefik_run_dir
+      failed_when: not traefik_run_dir.stat.exists
+
+    - name: Assert logrotate config deployed
+      ansible.builtin.stat:
+        path: /etc/logrotate.d/traefik
+      register: traefik_logrotate_file
+      failed_when: not traefik_logrotate_file.stat.exists
+
+    - name: Run logrotate in debug mode (config syntax check)
+      ansible.builtin.command: logrotate -d /etc/logrotate.d/traefik
+      changed_when: false
