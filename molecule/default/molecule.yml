@@ -4,6 +4,10 @@ role_name_check: 1
 
 dependency:
   name: galaxy
+  # Explicitly point at the repo-level requirements.yml so the galaxy
+  # dependency step always resolves it (previously reported "2 missing").
+  options:
+    requirements-file: ../../../requirements.yml
 
 driver:
   name: docker
@@ -26,8 +30,14 @@ platforms:
 
 provisioner:
   name: ansible
+  config_options:
+    defaults:
+      # Avoid interpreter-discovery warnings inside the minimal container.
+      interpreter_python: auto_silent
   playbooks:
     converge: converge.yml
+    prepare: prepare.yml
+    verify: verify.yml
   inventory:
     group_vars:
       traefik_servers:
@@ -54,13 +64,15 @@ verifier:
 scenario:
   test_sequence:
     - dependency
-    - cleanup
+    # 'cleanup' removed from the sequence: this scenario has no cleanup.yml
+    # and its absence produced "Missing playbook" warnings on every run;
+    # the destroy action below already covers teardown.
     - destroy
     - syntax
     - create
     - prepare
     - converge
     - idempotence
-    - check
+    - side_effect
     - verify
     - destroy

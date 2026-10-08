@@ -1,0 +1,20 @@
+---
+# Prepare playbook for the default Molecule scenario.
+# Bootstraps a bare RockyLinux 9 container so converge can run cleanly:
+# package toolchain for unarchive, process tools for pgrep (logrotate),
+# shadow-utils for user/group management inside minimal images.
+- name: Prepare
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Install base packages required by the role
+      ansible.builtin.package:
+        name:
+          - tar
+          - gzip
+          - procps-ng
+          - logrotate
+          - shadow-utils
+        state: present

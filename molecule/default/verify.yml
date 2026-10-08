@@ -1,0 +1,92 @@
+---
+# Verify playbook for the default Molecule scenario.
+# Post-converge assertions: binary + pinned version, offline config
+# validation (`traefik --check`), enabled/running service, listening
+# entrypoints, rendered dynamic configs, logrotate file.
+- name: Verify Traefik role outcome
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Check that the Traefik binary is installed
+      ansible.builtin.stat:
+        path: "{{ traefik_bin_dir }}/traefik"
+      register: traefik_bin
+      failed_when: not traefik_bin.stat.exists
+
+    - name: Get installed Traefik version
+      ansible.builtin.command:
+        argv:
+          - "{{ traefik_bin_dir }}/traefik"
+          - version
+      register: traefik_ver
+      changed_when: false
+
+    - name: Assert installed version matches the pinned traefik_version
+      ansible.builtin.assert:
+        that:
+          - >-
+            (traefik_version[1:] if traefik_version is match('^v') else traefik_version)
+            in traefik_ver.stdout
+        fail_msg: "Expected {{ traefik_version }}, got: {{ traefik_ver.stdout }}"
+
+    - name: Check static configuration file exists
+      ansible.builtin.stat:
+        path: "{{ traefik_static_config_file }}"
+      register: traefik_cfg
+      failed_when: not traefik_cfg.stat.exists
+
+    - name: Validate static configuration offline (traefik --check)
+      ansible.builtin.command:
+        argv:
+          - "{{ traefik_bin_dir }}/traefik"
+          - "--configFile={{ traefik_static_config_file }}"
+          - "--check=true"
+      changed_when: false
+
+    - name: Gather Traefik service status
+      ansible.builtin.systemd:
+        name: "{{ traefik_service_name }}"
+      register: traefik_svc
+
+    - name: Assert the service is enabled and running
+      ansible.builtin.assert:
+        that:
+          - traefik_svc.status.enabled | bool
+          - traefik_svc.status.ActiveState == "active"
+        fail_msg: "Traefik service is not enabled/running: {{ traefik_svc.status }}"
+
+    - name: Ensure iproute is present for socket checks
+      ansible.builtin.package:
+        name: iproute
+        state: present
+
+    - name: Collect listening TCP sockets
+      ansible.builtin.command: ss -ltn
+      register: ss_out
+      changed_when: false
+
+    - name: Assert web (:80) and websecure (:443) entrypoints are listening
+      ansible.builtin.assert:
+        that:
+          - "':80' in ss_out.stdout"
+          - "':443' in ss_out.stdout"
+        fail_msg: "Entrypoint ports missing from `ss -ltn`:\n{{ ss_out.stdout }}"
+
+    - name: Find rendered dynamic configuration files
+      ansible.builtin.find:
+        paths: "{{ traefik_dynamic_config_dir }}"
+        patterns: "*.yml"
+      register: dyn_files
+
+    - name: Assert at least one dynamic config file was deployed
+      ansible.builtin.assert:
+        that: dyn_files.matched >= 1
+        fail_msg: "No dynamic config files found in {{ traefik_dynamic_config_dir }}"
+
+    - name: Check logrotate configuration is deployed
+      ansible.builtin.stat:
+        path: /etc/logrotate.d/traefik
+      register: lr
+      failed_when: not lr.stat.exists
