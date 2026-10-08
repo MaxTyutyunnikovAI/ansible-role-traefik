@@ -1,0 +1,232 @@
+---
+# ============================================================================
+# Пример плейбука: Traefik v3 (systemd) + Kubernetes Provider (k3s)
+# ----------------------------------------------------------------------------
+# Сценарий: сервер(ы) с k3s. Traefik работает как systemd-сервис на хосте
+# кластера и использует kubernetesprovider (Ingress/IngressClass, а также
+# CRD Traefik — IngressRoute/Middleware), читая конфигурацию через API-эндпоинт
+# kube-apiserver по kubeconfig со встроенным сервисным токеном.
+#
+# Особенности k3s:
+#   * в k3s уже встроен свой Traefik (Chart helm-install-traefik) — его нужно
+#     удалить, иначе два ingress-контроллера будут конфликтовать;
+#   * kubeconfig: /etc/rancher/k3s/k3s.yaml (сервер), сервисный namespace —
+#     kube-system, токен: secret traefik-service-account (создаём ниже);
+#   * юнит роли запускается от пользователя traefik, поэтому kubeconfig
+#     кладём в домашний каталог сервиса и выдаём права.
+#
+# Запуск:
+#   ansible-playbook -i inventory.ini docs/examples/playbook-k3s-provider.yml
+# ============================================================================
+
+- name: Install Traefik with Kubernetes provider on a k3s server
+  hosts: k3s_servers
+  become: true
+
+  vars:
+    traefik_version: v3.6.2
+
+    # Настройки kubernetesprovider, смерживаются в providers (см. tasks ниже).
+    k8s_provider_opts:
+      # Единственный обрабатываемый IngressClass (в v3 по умолчанию включён
+      # режим ingressclass — Traefik игнорирует Ingress без него).
+      ingressClass: traefik
+      ingressClassResource:
+        name: traefik
+        default: false
+      # Watch ресурсы только в этих namespaces (пусто = все):
+      # watchNamespace: [default, ingress]
+
+    # Динамическая конфигурация (File Provider) — TLS-настройки по умолчанию
+    # и middlewares, доступные из Ingress-аннотаций как middleware@file.
+    traefik_dynamic_configs:
+      - name: tls-options
+        content:
+          tls:
+            options:
+              default:
+                minVersion: VersionTLS12
+                sniStrict: false           # SNI strict может ломать health-check'и LB
+
+    traefik_enable_acme: true
+    traefik_cert_resolvers:
+      letsencrypt:
+        acme:
+          email: ops@example.com
+          storage: "{{ traefik_data_dir }}/acme.json"
+          httpChallenge:
+            entryPoint: web
+
+  tasks:
+    # ------------------------------------------------------------------
+    # 1. Удалить встроенный Traefik из k3s (конфликт двух ingress-контроллеров).
+    # ------------------------------------------------------------------
+    - name: Uninstall bundled k3s Traefik chart
+      ansible.builtin.command: k3s helm uninstall traefik -n kube-system
+      register: _helm_uninstall
+      failed_when:
+        - _helm_uninstall.rc != 0
+        - "'not found' not in _helm_uninstall.stderr"
+      changed_when: _helm_uninstall.rc == 0
+
+    # ------------------------------------------------------------------
+    # 2. Сервис-аккаунт и токен для доступа Traefik к API кластера.
+    # ------------------------------------------------------------------
+    - name: Create Traefik service account
+      ansible.builtin.command: k3s kubectl create serviceaccount traefik -n kube-system
+      register: _sa
+      failed_when:
+        - _sa.rc != 0
+        - "'already exists' not in _sa.stderr"
+      changed_when: _sa.rc == 0
+
+    - name: Bind cluster-admin role to the Traefik service account
+      ansible.builtin.command: >-
+        k3s kubectl create clusterrolebinding traefik
+        --clusterrole=cluster-admin
+        --serviceaccount=kube-system:traefik
+      register: _crb
+      failed_when:
+        - _crb.rc != 0
+        - "'already exists' not in _crb.stderr"
+      changed_when: _crb.rc == 0
+
+    - name: Get a long-lived token secret for the Traefik service account
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        k3s kubectl get secret -n kube-system
+        $(k3s kubectl get serviceaccount traefik -n kube-system -o jsonpath='{.secrets[0].name}')
+        -o jsonpath='{.data.token}' | base64 -d
+      register: _k8s_token
+      changed_when: false
+      no_log: true
+
+    # ------------------------------------------------------------------
+    # 3. Kubeconfig для systemd-сервиса traefik (указываем путь явно в
+    #    статической конфигурации провайдера — см. roles.kubernetesprovider.kubeconfig).
+    # ------------------------------------------------------------------
+    - name: Write kubeconfig for the Traefik daemon
+      ansible.builtin.copy:
+        dest: "{{ traefik_config_dir }}/k3s.kubeconfig"
+        owner: "{{ traefik_system_user }}"
+        group: "{{ traefik_system_group }}"
+        mode: "0600"
+        content: |
+          apiVersion: v1
+          kind: Config
+          clusters:
+            - name: default
+              cluster:
+                certificate-authority-data: {{ lookup('file', '/var/lib/rancher/k3s/server/tls/client-ca.crt') | b64encode }}
+                server: https://127.0.0.1:6443
+          users:
+            - name: system:serviceaccount:kube-system:traefik
+              user:
+                token: {{ _k8s_token.stdout }}
+          contexts:
+            - name: default
+              context:
+                cluster: default
+                user: system:serviceaccount:kube-system:traefik
+      no_log: true
+
+    # ------------------------------------------------------------------
+    # 4. Применить роль: merge kubernetes provider в providers.
+    # ------------------------------------------------------------------
+    - name: Apply w0.traefik role with kubernetesprovider merged into providers
+      ansible.builtin.include_role:
+        name: w0.traefik
+      vars:
+        traefik_static_config: >-
+          {{ traefik_static_config
+             | combine({'providers':
+                          traefik_static_config.providers
+                          | combine({'kubernetesprovider':
+                                       k8s_provider_opts
+                                       | combine({'kubeconfig': traefik_config_dir ~ '/k3s.kubeconfig'})
+                                    })}, recursive=True) }}
+
+    # ------------------------------------------------------------------
+    # 5. IngressClass и демо-Ingress (проверка работы провайдера).
+    # ------------------------------------------------------------------
+    - name: Ensure Traefik IngressClass exists
+      ansible.builtin.copy:
+        dest: /tmp/traefik-ingressclass.yml
+        mode: "0644"
+        content: |
+          apiVersion: networking.k8s.io/v1
+          kind: IngressClass
+          metadata:
+            name: traefik
+          spec:
+            controller: traefik.io/ingress-controller
+      changed_when: false
+
+    - name: Apply IngressClass
+      ansible.builtin.command: k3s kubectl apply -f /tmp/traefik-ingressclass.yml
+      changed_when: false
+
+    - name: Deploy demo whoami app behind Traefik via Ingress
+      ansible.builtin.copy:
+        dest: /tmp/whoami-ingress.yml
+        mode: "0644"
+        content: |
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: whoami
+            namespace: default
+          spec:
+            replicas: 1
+            selector:
+              matchLabels: {app: whoami}
+            template:
+              metadata:
+                labels: {app: whoami}
+              spec:
+                containers:
+                  - name: whoami
+                    image: traefik/whoami
+                    ports: [{containerPort: 80}]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: whoami
+            namespace: default
+          spec:
+            selector: {app: whoami}
+            ports: [{port: 80, targetPort: 80}]
+          ---
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: whoami
+            namespace: default
+            annotations:
+              kubernetes.io/ingress.class: traefik
+              traefik.frontend.entryPoints: websecure
+          spec:
+            ingressClassName: traefik
+            rules:
+              - host: whoami.example.com
+                http:
+                  paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service: {name: whoami, port: {number: 80}}
+      changed_when: false
+
+    - name: Apply demo app and Ingress
+      ansible.builtin.command: k3s kubectl apply -f /tmp/whoami-ingress.yml
+      register: _apply
+      changed_when: "'configured' in _apply.stdout or 'created' in _apply.stdout"
+
+    - name: Verify Traefik picked up the ingress router
+      ansible.builtin.uri:
+        url: https://127.0.0.1/api/http/routers
+        validate_certs: false
+        return_content: true
+      register: _routers
+      failed_when: "'whoami' not in _routers.content"

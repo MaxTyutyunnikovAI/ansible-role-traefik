@@ -1,0 +1,149 @@
+---
+# ============================================================================
+# Пример плейбука: Traefik v3 (systemd) + Docker Provider
+# ----------------------------------------------------------------------------
+# Сценарий: одиночный хост с Docker Engine. Traefik запускается как
+# systemd-сервис (роль w0.traefik), работает в docker-сети `proxy` и
+# автоматически обнаруживает контейнеры по их LABEL'ам.
+#
+# Требования на целевом хосте:
+#   * установленный Docker Engine (роль его НЕ ставит);
+#   * группа `docker` и сокет /var/run/docker.sock (по умолчанию).
+#
+# Запуск:
+#   ansible-playbook -i inventory.ini docs/examples/playbook-docker-provider.yml
+# ============================================================================
+
+- name: Install Traefik with Docker provider
+  hosts: traefik
+  become: true
+
+  vars:
+    traefik_version: v3.6.2
+
+    # ------------------------------------------------------------------
+    # Настройки docker-провайдера, которые будут смержены в providers
+    # статической конфигурации (см. блок roles ниже).
+    # ------------------------------------------------------------------
+    docker_provider_opts:
+      endpoint: "unix:///var/run/docker.sock"
+      exposedByDefault: false          # маршрутизируем ТОЛЬКО контейнеры с явным traefik.enable=true
+      network: proxy                   # docker-сеть, в которую подключены сервисы
+      watch: true
+
+    # ------------------------------------------------------------------
+    # Динамическая конфигурация (File Provider) остаётся полезной для
+    # глобальных TLS-настроек и middlewares, не привязанных к контейнерам.
+    # ------------------------------------------------------------------
+    traefik_dynamic_configs:
+      - name: tls-options
+        content:
+          tls:
+            options:
+              default:
+                minVersion: VersionTLS12
+                sniStrict: true
+      - name: default-middlewares
+        content:
+          http:
+            middlewares:
+              security-headers:
+                headers:
+                  stsSeconds: "31536000"
+                  contentTypeNosniff: true
+                  frameDeny: true
+              https-redirect:
+                redirectScheme:
+                  scheme: https
+                  permanent: true
+
+    # ACME через HTTP-01 (Let's Encrypt email замените на свой)
+    traefik_enable_acme: true
+    traefik_cert_resolvers:
+      letsencrypt:
+        acme:
+          email: ops@example.com
+          storage: "{{ traefik_data_dir }}/acme.json"
+          httpChallenge:
+            entryPoint: web
+
+  pre_tasks:
+    # Сервис-юнит Traefik должен попадать в docker-сеть вместе с бэкендами:
+    # создаём сеть `proxy` (bridge) идемпотентно, до применения роли.
+    - name: Ensure docker network 'proxy' exists
+      community.docker.docker_network:
+        name: proxy
+        driver: bridge
+      # Если коллекции community.docker нет в requirements, можно заменить на:
+      #   ansible.builtin.command: docker network create proxy
+      #   args:
+      #     creates: /dev/null   -- или проверить через `docker network inspect`.
+
+  roles:
+    - role: w0.traefik
+      # Merge docker-провайдера в providers, НЕ переписывая defaults целиком.
+      # В блоке roles переменная с тем же именем, что и в defaults роли,
+      # имеет приоритет над default-level значением — рекурсивный combine
+      # сохраняет остальные ключи (global, entryPoints, log, api, file…).
+      traefik_static_config: >-
+        {{ traefik_static_config
+           | combine({'providers':
+                        traefik_static_config.providers
+                        | combine(docker_provider_opts)}, recursive=True) }}
+      # Закалённый юнит роли делает / только часть ФС доступной для записи и
+      # ограничивает capabilities; для чтения docker.sock достаточно:
+      #   * добавить traefik в группу docker (см. post_tasks);
+      #   * выдать процессу дополнительную capability CAP_DAC_READ_SEARCH
+      #     (обход прав на чтение сокетов/файлов) и разрешить путь к сокету.
+      traefik_extra_capabilities:
+        - CAP_DAC_READ_SEARCH
+      traefik_extra_unit_vars:
+        SupplementaryGroups: docker
+
+  post_tasks:
+    # Доступ к docker.sock: системный пользователь traefik должен состоять
+    # в группе docker (владельце сокета).
+    - name: Add traefik user to docker group
+      ansible.builtin.user:
+        name: "{{ traefik_system_user }}"
+        groups: docker
+        append: true
+      notify: validate_and_restart_traefik
+
+    # Перезапуск сервиса, чтобы новые группы/capabilities юнита применились
+    # (изменение traefik_extra_* выше уже пересобрало юнит и вызвало
+    # daemon-reload + валидированный рестарт через handlers роли).
+    - name: Reload systemd and restart traefik
+      ansible.builtin.systemd_service:
+        name: traefik
+        daemon_reload: true
+        state: restarted
+
+    # ------------------------------------------------------------------
+    # Демо-сервис: whoami-контейнер, объявленный Traefik'у через LABEL'ы.
+    # ------------------------------------------------------------------
+    - name: Run demo whoami container behind Traefik
+      community.docker.docker_container:
+        name: whoami
+        image: traefik/whoami:latest
+        networks:
+          - name: proxy
+        restart_policy: always
+        labels:
+          traefik.enable: "true"
+          traefik.docker.network: "proxy"
+          traefik.http.routers.whoami.rule: "Host(`whoami.example.com`)"
+          traefik.http.routers.whoami.entrypoints: "websecure"
+          traefik.http.routers.whoami.tls.certresolver: "letsencrypt"
+          traefik.http.routers.whoami.middlewares: "security-headers@file,https-redirect@file"
+          traefik.http.services.whoami.loadbalancer.server.port: "80"
+
+    # Проверка: API включён (api.dashboard=true), но insecure=false —
+    # обращаемся к dashboard через websecure с self-signed/LE сертификатом.
+    - name: Verify Traefik sees the whoami router
+      ansible.builtin.uri:
+        url: https://127.0.0.1/api/http/routers
+        validate_certs: false
+        return_content: true
+      register: _routers
+      failed_when: "'whoami' not in _routers.content"

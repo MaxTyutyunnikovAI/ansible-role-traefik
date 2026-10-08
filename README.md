@@ -90,6 +90,12 @@ traefik_dynamic_configs:
       traefik_version: v3.6.2
 ```
 
+Готовые примеры подключения провайдеров (Docker, Kubernetes/k3s) — в
+каталоге [`docs/`](docs/README.md):
+
+* `docs/examples/playbook-docker-provider.yml` — Docker Provider + LABEL'ы контейнеров;
+* `docs/examples/playbook-k3s-provider.yml` — Kubernetes Provider на базе k3s (Ingress/IngressClass).
+
 Тестирование
 ------------
 
