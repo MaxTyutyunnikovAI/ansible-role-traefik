@@ -7,6 +7,10 @@
 traefik_version: "v3.6.2"                      # pinned v3.x release tag
 traefik_repo_url: "https://github.com/traefik/traefik"
 traefik_binary_url: "{{ traefik_repo_url }}/releases/download/{{ traefik_version }}/traefik_{{ traefik_version }}_linux_{{ go_arch }}.tar.gz"
+# Optional sha256 of the tarball (from the GitHub release checksums file).
+# Empty string keeps the download unverified (checksum files change format
+# across releases, so verification is opt-in per version bump).
+traefik_binary_checksum: ""                    # e.g. "sha256:<64 hex chars>"
 traefik_download_tmp_dir: "/tmp/traefik-download"
 
 # Users / paths ------------------------------------------------------------
@@ -31,7 +35,14 @@ traefik_start_timeout: 30                      # StartSec in seconds
 traefik_restart_sec: 5                         # RestartSec in seconds
 traefik_limit_nofile: 1048576
 traefik_extra_capabilities: []                 # e.g. ["CAP_NET_RAW"]
-traefik_extra_unit_vars: {}                    # free-form extra [Service] keys
+# Free-form extra [Service] keys — rendered verbatim into the unit template
+# (applied in templates/traefik.service.j2; values must be systemd-valid strings).
+traefik_extra_unit_vars: {}                    # e.g. {TCPKeepAlive: "yes"}
+
+# Environment passed to the daemon (ACME DNS provider keys like
+# CF_API_TOKEN / ROUTER53_* live here — kept out of the world-readable
+# config file; use ansible-vault for secrets in inventory).
+traefik_envs: {}                               # e.g. {CF_API_TOKEN: "{{ vault_cf_token }}"}
 
 # Logrotate ------------------------------------------------------------------
 traefik_logrotate_enabled: true
@@ -85,6 +96,48 @@ traefik_static_config:
       directory: "{{ traefik_dynamic_config_dir }}"
       watch: true
 
+  # metrics:
+  #   prometheus:
+  #     addEntryPointsLabels: true
+  #     addRoutersLabels: true
+  #     addServicesLabels: true
+  # ping: {}                    # /ping health endpoint (useful for LB/monitoring)
+  # serversTransport:           # TLS settings for Traefik -> backends connections
+  #   insecureSkipVerify: false
+  #   maxIdleConnPerHost: 50
+  #   responseHeaderTimeout: 30s
+  #   handshakeTimeout: 10s
+
+# ----------------------------------------------------------------------------
+# CERTIFICATE RESOLVERS (ACME / Let's Encrypt)
+# Declarative dict rendered into the static config as `certificatesResolvers`.
+# Empty dict (default) -> no resolvers section; the default entryPoint config
+# references "letsencrypt" only as an example — set traefik_enable_acme: true
+# (or override this dict) to actually obtain certificates.
+# DNS challenge keys (CF_API_TOKEN etc.) go to `traefik_envs`, NOT here, so
+# secrets never land in the on-disk configuration file.
+# ----------------------------------------------------------------------------
+traefik_enable_acme: false                     # convenience switch for the block below
+traefik_cert_resolvers: {}
+# Example (HTTP-01 via the web entrypoint):
+#   traefik_cert_resolvers:
+#     letsencrypt:
+#       acme:
+#         email: ops@example.com
+#         storage: "{{ traefik_data_dir }}/acme.json"
+#         caServer: "https://acme-v02.api.letsencrypt.org/directory"
+#         httpChallenge:
+#           entryPoint: web
+# Example (DNS-01 via Cloudflare, with traefik_envs: {CF_API_TOKEN: ...}):
+#   traefik_cert_resolvers:
+#     letsencrypt:
+#       acme:
+#         email: ops@example.com
+#         storage: "{{ traefik_data_dir }}/acme.json"
+#         dnsChallenge:
+#           provider: cloudflare
+#           delayBeforeCheck: 10
+
 # ----------------------------------------------------------------------------
 # DYNAMIC CONFIGURATION (File Provider). Each list item is rendered as a
 # separate YAML file into traefik_dynamic_config_dir via a loop in configure.yml
@@ -110,3 +163,27 @@ traefik_dynamic_configs:
   #   content:
   #     http:
   #       routers: ...
+
+# ----------------------------------------------------------------------------
+# OPTIONAL DEFAULT MIDDLEWARES (rendered into conf.d/00-default-middlewares.yml
+# when traefik_default_middlewares_enabled is true). Reference them from any
+# router: http.routers.<name>.middlewares: [security-headers, https-redirect].
+# ----------------------------------------------------------------------------
+traefik_default_middlewares_enabled: false
+traefik_hsts_max_age: 31536000                 # 1 year
+traefik_dashboard_basic_auth: []               # htpasswd users, e.g. ["admin:{{ vault_htpasswd_hash }}"]
+traefik_default_middlewares:
+  security-headers:
+    headers:
+      stsSeconds: "{{ traefik_hsts_max_age }}"
+      stsIncludeSubdomains: true
+      stsPreload: true
+      forceSTSHeader: true
+      contentTypeNosniff: true
+      browserXssFilter: true
+      frameDeny: true
+      referrerPolicy: "no-referrer-when-downgrade"
+  https-redirect:
+    redirectScheme:
+      scheme: https
+      permanent: true

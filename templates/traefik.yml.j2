@@ -1,9 +1,19 @@
 {#-
     Static Traefik v3 configuration.
-    Fully declarative: the whole file is a dump of the traefik_static_config
-    dictionary rendered via the to_nice_yaml(indent=2) filter, so overrides
-    from inventory/group_vars behave predictably (dict merge/replace).
+    Declarative: the traefik_static_config dictionary is merged with computed
+    blocks (certificatesResolvers from traefik_cert_resolvers / traefik_enable_acme)
+    and dumped via to_nice_yaml(indent=2), so overrides from inventory/group_vars
+    behave predictably (dict merge/replace).
 -#}
 # {{ ansible_managed }}
 # Generated from the "traefik_static_config" dictionary — do not edit by hand.
-{{ traefik_static_config | to_nice_yaml(indent=2) }}
+{#- Resolver precedence: explicit traefik_cert_resolvers wins; otherwise the
+    convenience switch traefik_enable_acme injects a default HTTP-01 resolver;
+    otherwise no certificatesResolvers block is emitted at all. -#}
+{% set _resolvers = traefik_cert_resolvers
+                    if (traefik_cert_resolvers | length > 0)
+                    else (traefik_default_acme_resolver if (traefik_enable_acme | bool) else {}) %}
+{% set _static = traefik_static_config | combine(
+       {'certificatesResolvers': _resolvers} if (_resolvers | length > 0) else {}
+   ) %}
+{{ _static | to_nice_yaml(indent=2) }}

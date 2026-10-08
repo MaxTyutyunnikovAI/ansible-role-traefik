@@ -74,6 +74,55 @@
           - "':443' in ss_out.stdout"
         fail_msg: "Entrypoint ports missing from `ss -ltn`:\n{{ ss_out.stdout }}"
 
+    # Functional check of the :80 entrypoint: with the default config it must
+    # answer with a 301 redirect to https (web -> websecure redirections).
+    - name: Ensure curl is available for HTTP checks
+      ansible.builtin.package:
+        name: curl
+        state: present
+
+    - name: Request http://localhost/ through the web entrypoint
+      ansible.builtin.uri:
+        url: http://localhost/
+        follow_redirects: none
+        status_code: [200, 301, 302, 308]
+      register: web_probe
+
+    - name: Assert the web entrypoint redirects to HTTPS
+      ansible.builtin.assert:
+        that:
+          - web_probe.status in [301, 302, 308]
+          - "'https://' in (web_probe.location | default(''))"
+        fail_msg: >-
+          Expected an HTTPS redirect from :80, got status={{ web_probe.status }}
+          location={{ web_probe.location | default('<none>') }}
+
+    # TLS handshake on :443 must succeed at the TCP/TLS layer even without a
+    # resolvable certificate (Traefik serves its self-signed fallback cert).
+    - name: Probe the TLS endpoint on :443
+      ansible.builtin.command:
+        argv: ["curl", "-sk", "--max-time", "5", "https://localhost/"]
+      register: tls_probe
+      changed_when: false
+      failed_when: "tls_probe.rc not in [0, 35, 52, 56]"
+
+    # The systemd unit must stay hardened and honour the tuning knobs.
+    - name: Read the deployed systemd unit
+      ansible.builtin.slurp:
+        src: "/etc/systemd/system/{{ traefik_service_name }}.service"
+      register: unit_file
+
+    - name: Assert key hardening directives are present in the unit
+      vars:
+        unit_content: "{{ unit_file.content | b64decode }}"
+      ansible.builtin.assert:
+        that:
+          - "'NoNewPrivileges=true' in unit_content"
+          - "'ProtectSystem=full' in unit_content"
+          - "'CAP_NET_BIND_SERVICE' in unit_content"
+          - "'{{ traefik_limit_nofile }}' in unit_content"
+        fail_msg: "systemd unit lost hardening directives:\n{{ unit_content }}"
+
     - name: Find rendered dynamic configuration files
       ansible.builtin.find:
         paths: "{{ traefik_dynamic_config_dir }}"

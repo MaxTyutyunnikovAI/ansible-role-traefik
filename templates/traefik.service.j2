@@ -21,6 +21,11 @@ User={{ traefik_system_user }}
 Group={{ traefik_system_group }}
 
 WorkingDirectory={{ traefik_data_dir }}
+# Environment for the daemon (ACME DNS provider tokens etc.) — injected via
+# systemd instead of the config file so secrets never touch /etc/traefik.
+{% for key, value in traefik_envs | dict2items %}
+Environment="{{ key }}={{ value }}"
+{% endfor %}
 ExecStart={{ traefik_bin_dir }}/traefik \
   --configFile={{ traefik_static_config_file }}
 
@@ -54,6 +59,11 @@ AmbientCapabilities={{ cap }}
 
 ReadWritePaths={{ traefik_log_dir }}
 ReadWritePaths={{ traefik_data_dir }}
+
+# Free-form extra [Service] keys from traefik_extra_unit_vars (dict -> "Key=Value").
+{% for key, value in traefik_extra_unit_vars | dict2items %}
+{{ key }}={{ value }}
+{% endfor %}
 
 # /run is always writable even under ProtectSystem, so no ReadWritePaths entry
 # is needed for it. The pidfile below is consumed by the logrotate postrotate

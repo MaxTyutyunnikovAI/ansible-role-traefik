@@ -32,6 +32,36 @@
     label: "{{ traefik_dynamic_config_dir }}/{{ item.name }}.yml"
   notify: validate_and_restart_traefik
 
+- name: Render default middlewares file (security headers, https redirect)
+  ansible.builtin.copy:
+    content: "{{ {'http': {'middlewares': _middlewares}} | to_nice_yaml(indent=2) }}"
+    dest: "{{ traefik_dynamic_config_dir }}/00-default-middlewares.yml"
+    owner: "{{ traefik_config_owner }}"
+    group: "{{ traefik_config_group }}"
+    mode: "{{ traefik_config_mode }}"
+  vars:
+    # traefik_default_middlewares + optional dashboard basicAuth middleware
+    # (basicAuth is only emitted when htpasswd users are provided — an empty
+    # list would make the router reject every request).
+    _middlewares: >-
+      {{ traefik_default_middlewares
+         | combine(({'dashboard-auth': {'basicAuth': {'users': traefik_dashboard_basic_auth}}}
+                    if (traefik_dashboard_basic_auth | length > 0) else {})) }}
+  when: traefik_default_middlewares_enabled | bool
+  notify: validate_and_restart_traefik
+
+- name: Remove default middlewares file when the option is disabled
+  ansible.builtin.file:
+    path: "{{ traefik_dynamic_config_dir }}/00-default-middlewares.yml"
+    state: absent
+  when: not (traefik_default_middlewares_enabled | bool)
+  # `file: state=absent` reports "changed" on every run for missing files,
+  # which would break idempotence; only a real removal (existed before) is a
+  # change worth notifying.
+  changed_when: file_result.stat.exists | default(false)
+  register: file_result
+  notify: validate_and_restart_traefik
+
 # NOTE ON DYNAMIC CONFIG VALIDATION (verified empirically with Traefik v3):
 # `traefik --configFile=<file> --check` validates ONLY static configuration and
 # binds entrypoint sockets while checking. File Provider dynamic resources are
