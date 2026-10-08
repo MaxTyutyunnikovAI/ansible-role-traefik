@@ -18,9 +18,20 @@
 #   vars:
 #     traefik_static_config: >-
 #       {{ traefik_role_defaults.traefik_static_config
-#          | combine({'providers':
-#                       traefik_role_defaults.traefik_static_config.providers
-#                       | combine(docker_provider_opts)}, recursive=True) }}
+#          | combine({'providers': {'docker': docker_provider_opts}},
+#                    recursive=True) }}
+#
+# Canonical plain (non-templated) copy of the role's default provider options
+# from defaults/main.yml — the safe base for merging extra providers on top of
+# the built-in `file` provider. Like traefik_role_defaults above, it must stay
+# plain data: referencing `traefik_static_config.providers` from an override
+# of `traefik_static_config` re-enters templating and blows the recursion
+# limit. Keep it in sync with the `providers:` block in defaults/main.yml.
+traefik_default_providers:
+  file:
+    directory: "{{ traefik_dynamic_config_dir }}"
+    watch: true
+
 traefik_role_defaults:
   traefik_static_config:
     global:

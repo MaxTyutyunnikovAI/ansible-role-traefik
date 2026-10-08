@@ -70,6 +70,16 @@ traefik_logrotate_maxsize: "100M"
 
 Статическая конфигурация по умолчанию включает entry points `web` (:80 с редиректом на HTTPS) и `websecure` (:443, certResolver `letsencrypt`), JSON-логирование, accessLog, API dashboard и file provider. Полностью переопределяется словарём `traefik_static_config`.
 
+> ⚠️ При переиспользовании дефолтов в собственном определении `traefik_static_config`
+> (например, `{{ traefik_static_config | combine(...) }}` или
+> `{{ traefik_static_config.providers | combine(...) }}` в `roles:`/`vars:`) возникает
+> цикл резолва переменных Ansible — задача падает с
+> `AnsibleError: ... maximum recursion depth exceeded while calling a Python object`.
+> База для merge вынесена в нешаблонные plain-копии из `vars/main.yml`:
+> `traefik_role_defaults.traefik_static_config` (вся статика) и
+> `traefik_default_providers` (блок providers). Примеры безопасного merge —
+> в [`docs/examples/`](docs/examples/).
+
 Динамическая конфигурация задаётся списком `traefik_dynamic_configs`; каждый элемент разворачивается в отдельный файл `<name>.yml` в каталоге `conf.d`:
 
 ```yaml
