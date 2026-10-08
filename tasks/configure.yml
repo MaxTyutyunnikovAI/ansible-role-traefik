@@ -36,10 +36,13 @@
       - "--setup={{ traefik_pilot_token }}"     # TRIAL- token, keep it in ansible-vault
       - "--download={{ item.name }}@{{ item.version }}"
     chdir: "{{ traefik_config_dir }}"           # pilot writes ./pilot.yml next to CWD
+    # `creates` must live INSIDE the module options — as a top-level task key
+    # it collides with the `ansible.builtin.command` action and Ansible aborts
+    # with "ERROR! conflicting action statements: ansible.builtin.command, creates".
+    creates: "{{ traefik_plugins_dir }}/{{ item.name }}@{{ item.version }}.go"
   loop: "{{ traefik_plugins }}"
   loop_control:
     label: "{{ item.name }}@{{ item.version }}"
-  creates: "{{ traefik_plugins_dir }}/{{ item.name }}@{{ item.version }}.go"
   no_log: true                                  # the token appears in argv
   changed_when: true                            # "skipped (creates)" stays quiet; real fetch = change
   when:
