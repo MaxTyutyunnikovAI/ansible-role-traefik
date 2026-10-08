@@ -109,13 +109,22 @@
       # Merge docker-провайдера в providers, НЕ переписывая defaults целиком.
       # ВАЖНО: базой служит traefik_role_defaults.traefik_static_config
       # (plain-копия дефолтов роли из vars/main.yml), а НЕ сама переменная
-      # traefik_static_config — ссылка на собственное определение (в том
-      # числе вида `traefik_static_config.providers | combine(...)`) создаёт
-      # цикл резолва переменных и падает с "maximum recursion depth exceeded
-      # while calling a Python object". Опции провайдера добавляются вложенно
-      # под ключ `providers.docker:` — иначе они попали бы в корень
-      # `providers:` и Traefik их бы проигнорировал. Рекурсивный combine
-      # сохраняет остальные ключи (global, entryPoints, log, api, file…).
+      # traefik_static_config — ссылка на собственное определение создаёт
+      # цикл резолва переменных и задача «Generate static Traefik
+      # configuration …» падает с "maximum recursion depth exceeded while
+      # calling a Python object". НЕПРАВИЛЬНО (так писать нельзя):
+      #   traefik_static_config: >-
+      #     {{ traefik_static_config
+      #        | combine({'providers':
+      #                     traefik_static_config.providers
+      #                     | combine(docker_provider_opts)}, recursive=True) }}
+      # Кроме рекурсии этот вариант ошибочен и структурно: опции endpoint/
+      # exposedByDefault/network слились бы в корень секции `providers:`
+      # вместо `providers.docker:`, и Traefik их бы проигнорировал.
+      # Правильный merge ниже: база — plain-копия из vars/main.yml, опции
+      # провайдера добавляются вложенно под ключом `providers.docker:`,
+      # рекурсивный combine сохраняет остальные ключи (global, entryPoints,
+      # log, api, file…).
       traefik_static_config: >-
         {{ traefik_role_defaults.traefik_static_config
            | combine({'providers': {'docker': docker_provider_opts}},

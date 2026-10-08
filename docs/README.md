@@ -36,11 +36,31 @@
    > `{{ traefik_static_config.providers | combine(...) }}`) внутри
    > собственного определения `traefik_static_config` (в `roles:` или `vars:`):
    > Ansible резолвит имя обратно в эту же переменную, возникает цикл
-   > подстановки и задача падает с
+   > подстановки и задача «Generate static Traefik configuration from
+   > traefik_static_config dict» падает с
    > `AnsibleError: ... maximum recursion depth exceeded while calling a
    > Python object`. Именно поэтому база для merge вынесена в отдельную
    > нешаблонную переменную `traefik_role_defaults` (а копия блока providers —
    > в `traefik_default_providers`, обе в `vars/main.yml`).
+   >
+   > Типичный «исправленный наполовину» вариант, который всё ещё ломается:
+   >
+   > ```yaml
+   > # НЕПРАВИЛЬНО — базой снова выступает сама traefik_static_config:
+   > traefik_static_config: >-
+   >   {{ traefik_static_config
+   >      | combine({'providers':
+   >                   traefik_static_config.providers
+   >                   | combine(docker_provider_opts)}, recursive=True) }}
+   > ```
+   >
+   > Здесь рекурсия двойная: и корневой словарь, и `traefik_static_config.providers`
+   > ссылаются на определяемую переменную. Заодно это и структурная ошибка:
+   > `combine(docker_provider_opts)` вливает `endpoint/network/exposedByDefault`
+   > прямо в корень `providers:` вместо `providers.docker:` — Traefik такие
+   > ключи проигнорирует. Единственный корректный вариант — merge в
+   > `traefik_role_defaults.traefik_static_config` с вложенным ключом
+   > провайдера (см. код выше).
 
 2. **File Provider остаётся полезным** даже при активном docker/kubernetes
    провайдере: в `traefik_dynamic_configs` держат глобальные TLS-опции и

@@ -80,6 +80,33 @@ traefik_logrotate_maxsize: "100M"
 > `traefik_default_providers` (блок providers). Примеры безопасного merge —
 > в [`docs/examples/`](docs/examples/).
 
+### Ошибка `maximum recursion depth exceeded` в задаче «Generate static Traefik configuration»
+
+Если в inventory/group_vars или в блоке `roles:` встречается переопределение,
+ссылающееся на саму определяемую переменную:
+
+```yaml
+# НЕПРАВИЛЬНО — цикл резолва (плюс docker-опции попадают в корень providers:)
+traefik_static_config: >-
+  {{ traefik_static_config
+     | combine({'providers':
+                  traefik_static_config.providers
+                  | combine(docker_provider_opts)}, recursive=True) }}
+```
+
+то задача `Generate static Traefik configuration from traefik_static_config dict`
+падает с `AnsibleError: ... maximum recursion depth exceeded while calling a
+Python object`. Исправление — mergить в plain-копию дефолтов роли и вкладывать
+опции провайдера под его ключом:
+
+```yaml
+# ПРАВИЛЬНО
+traefik_static_config: >-
+  {{ traefik_role_defaults.traefik_static_config
+     | combine({'providers': {'docker': docker_provider_opts}},
+               recursive=True) }}
+```
+
 Динамическая конфигурация задаётся списком `traefik_dynamic_configs`; каждый элемент разворачивается в отдельный файл `<name>.yml` в каталоге `conf.d`:
 
 ```yaml

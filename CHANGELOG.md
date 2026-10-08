@@ -15,7 +15,12 @@
   резолв. Примеры в `docs/` переведены на нешаблонную базу
   `traefik_role_defaults.traefik_static_config` (плюс новый plain-блок
   `traefik_default_providers` в `vars/main.yml`); предупреждение добавлено в
-  комментарии `defaults/main.yml`, README и docs/README.
+  комментарии `defaults/main.yml`, README и docs/README. В README и docs/README
+  отдельно разобран «исправленный наполовину» вариант
+  `{{ traefik_static_config | combine({'providers': traefik_static_config.providers
+  | combine(docker_provider_opts)}, recursive=True) }}` — он по-прежнему
+  ссылается на собственное определение (двойной цикл резолва) и одновременно
+  теряет ключ провайдера; рядом приведён корректный merge.
 - Опции провайдера в примерах теперь вкладываются в `providers.docker:` /
   `providers.kubernetesprovider:` вместо слияния прямо в корень секции
   `providers:` (старый вариант терял ключ провайдера в итоговом traefik.yml).
