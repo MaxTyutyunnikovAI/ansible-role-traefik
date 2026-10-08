@@ -60,13 +60,20 @@ traefik_logrotate_maxsize: "100M"
 #
 # IMPORTANT — extending the config from playbooks/inventory: NEVER define an
 # override of `traefik_static_config` that references `traefik_static_config`
-# itself (e.g. `{{ traefik_static_config | combine(...) }}` in role vars or in
+# itself (e.g. `{{ traefik_static_config | combine(...) }}` or
+# `{{ traefik_static_config.providers | combine(...) }}` in role vars or in
 # the same vars scope). Jinja2 resolves the name back into this very
 # definition, producing a variable-resolution cycle that ends with
 # "maximum recursion depth exceeded while calling a Python object".
-# Merge into the canonical plain-data copy instead:
-#   traefik_role_defaults.traefik_static_config  (defined in vars/main.yml)
-# Keep the two dicts in sync when changing the defaults below.
+# Merge into the canonical plain-data copies instead (defined in vars/main.yml):
+#   traefik_role_defaults.traefik_static_config        (whole static config)
+#   traefik_default_providers                          (the providers block)
+# Example — add the docker provider without losing defaults:
+#   traefik_static_config: >-
+#     {{ traefik_role_defaults.traefik_static_config
+#        | combine({'providers': {'docker': docker_provider_opts}},
+#                  recursive=True) }}
+# Keep these plain copies in sync when changing the defaults below.
 # ----------------------------------------------------------------------------
 traefik_static_config:
   global:

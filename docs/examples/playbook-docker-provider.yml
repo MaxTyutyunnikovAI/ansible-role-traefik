@@ -109,15 +109,17 @@
       # Merge docker-провайдера в providers, НЕ переписывая defaults целиком.
       # ВАЖНО: базой служит traefik_role_defaults.traefik_static_config
       # (plain-копия дефолтов роли из vars/main.yml), а НЕ сама переменная
-      # traefik_static_config — ссылка на собственное определение создаёт
-      # цикл резолва переменных и падает с "maximum recursion depth
-      # exceeded". Рекурсивный combine сохраняет остальные ключи
-      # (global, entryPoints, log, api, file…).
+      # traefik_static_config — ссылка на собственное определение (в том
+      # числе вида `traefik_static_config.providers | combine(...)`) создаёт
+      # цикл резолва переменных и падает с "maximum recursion depth exceeded
+      # while calling a Python object". Опции провайдера добавляются вложенно
+      # под ключ `providers.docker:` — иначе они попали бы в корень
+      # `providers:` и Traefik их бы проигнорировал. Рекурсивный combine
+      # сохраняет остальные ключи (global, entryPoints, log, api, file…).
       traefik_static_config: >-
         {{ traefik_role_defaults.traefik_static_config
-           | combine({'providers':
-                        traefik_role_defaults.traefik_static_config.providers
-                        | combine(docker_provider_opts)}, recursive=True) }}
+           | combine({'providers': {'docker': docker_provider_opts}},
+                     recursive=True) }}
       # Закалённый юнит роли делает / только часть ФС доступной для записи и
       # ограничивает capabilities; для чтения docker.sock достаточно:
       #   * добавить traefik в группу docker (см. post_tasks);

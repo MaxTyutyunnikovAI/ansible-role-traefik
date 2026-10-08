@@ -6,6 +6,20 @@
 
 ## [Не выпущено]
 
+### Исправлено
+- Рекурсия шаблонов (`AnsibleError: ... maximum recursion depth exceeded while
+  calling a Python object`) при подключении docker/kubernetes-провайдера:
+  документированные примеры merge вида
+  `{{ traefik_static_config | combine({'providers': traefik_static_config.providers | combine(...)}) }}`
+  ссылались на собственное определение переменной, из-за чего Ansible зацикливал
+  резолв. Примеры в `docs/` переведены на нешаблонную базу
+  `traefik_role_defaults.traefik_static_config` (плюс новый plain-блок
+  `traefik_default_providers` в `vars/main.yml`); предупреждение добавлено в
+  комментарии `defaults/main.yml`, README и docs/README.
+- Опции провайдера в примерах теперь вкладываются в `providers.docker:` /
+  `providers.kubernetesprovider:` вместо слияния прямо в корень секции
+  `providers:` (старый вариант терял ключ провайдера в итоговом traefik.yml).
+
 ### Добавлено
 - Установка **плагинов Traefik v3** (trial-механизм + Traefik Pilot): переменные
   `traefik_pilot_enabled`, `traefik_pilot_token` (секрет — ansible-vault),

@@ -165,17 +165,17 @@
       vars:
         # ВАЖНО: базой merge служит traefik_role_defaults.traefik_static_config
         # (plain-копия дефолтов роли из vars/main.yml), а НЕ сама переменная
-        # traefik_static_config — ссылка на собственное определение создаёт
-        # цикл резолва переменных и падает с "maximum recursion depth
-        # exceeded while calling a Python object".
+        # traefik_static_config — ссылка на собственное определение (в том
+        # числе вида `traefik_static_config.providers | combine(...)`) создаёт
+        # цикл резолва переменных и падает с "maximum recursion depth exceeded
+        # while calling a Python object". Опции провайдера добавляются вложенно
+        # под ключ `providers.kubernetesprovider:`.
         traefik_static_config: >-
           {{ traefik_role_defaults.traefik_static_config
-             | combine({'providers':
-                          traefik_role_defaults.traefik_static_config.providers
-                          | combine({'kubernetesprovider':
-                                       k8s_provider_opts
-                                       | combine({'kubeconfig': traefik_config_dir ~ '/k3s.kubeconfig'})
-                                    })}, recursive=True) }}
+             | combine({'providers': {'kubernetesprovider':
+                                        k8s_provider_opts
+                                        | combine({'kubeconfig': traefik_config_dir ~ '/k3s.kubeconfig'})
+                                     }}, recursive=True) }}
 
     # ------------------------------------------------------------------
     # 5. IngressClass и демо-Ingress (проверка работы провайдера).
