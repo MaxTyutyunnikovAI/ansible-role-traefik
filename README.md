@@ -120,6 +120,31 @@ traefik_dynamic_configs:
             sniStrict: true
 ```
 
+Кроме декларативного списка роль умеет **генерировать динамические конфиги из
+собственного Jinja2-шаблона** — когда ресурсы нужно вычислить динамически (по
+фактам хоста, из словаря inventory, циклом и т.п.):
+
+```yaml
+# путь разрешается относительно templates/ роли (или абсолютный на контроллере)
+traefik_dynamic_configs_template: dynamic-routers.yml.j2
+traefik_dynamic_configs_template_name: 90-generated   # -> conf.d/90-generated.yml
+traefik_dynamic_configs_file_extension: ".yml"
+
+# пример данных, на которых работает идущий в роли шаблон-образец:
+traefik_generated_routers:
+  app:
+    host: app.example.com
+    url: http://127.0.0.1:8080
+    middlewares: [security-headers, https-redirect]
+```
+
+Внутри шаблона доступны все переменные роли, `ansible_facts` и сам список
+`traefik_dynamic_configs`. Файл рендерится идемпотентно и, как и остальные
+конфиги, уведомляет цепочку обработчиков валидации; при сбросе опции
+(`traefik_dynamic_configs_template: ""`, значение по умолчанию) сгенерированный
+файл аккуратно удаляется. Готовый образец — `templates/dynamic-routers.yml.j2`
+(http.services/http.routers из словаря `traefik_generated_routers`).
+
 Пример плейбука
 ---------------
 

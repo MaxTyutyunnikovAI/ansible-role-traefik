@@ -50,17 +50,54 @@
     - traefik_plugins | length > 0
     - not ansible_check_mode                    # the binary may not exist yet in check mode
 
-- name: Render dynamic configuration files (File Provider) from traefik_dynamic_configs
-  ansible.builtin.copy:
-    # Each item.content dict is serialized declaratively with to_nice_yaml.
-    content: "{{ item.content | to_nice_yaml(indent=2) }}"
-    dest: "{{ traefik_dynamic_config_dir }}/{{ item.name }}.yml"
+# --- Dynamic configuration generation (File Provider) ------------------------
+# Declarative source of truth for conf.d/*.yml:
+#   * traefik_dynamic_configs          — list of {name, content} items, one file each;
+#   * traefik_dynamic_configs_template — optional single Jinja2 template rendered into
+#     <traefik_dynamic_config_dir>/<traefik_dynamic_configs_template_name>.yml. The
+#     template has access to every role variable and to `traefik_dynamic_configs`, so
+#     it can generate several resources/files' worth of YAML from host facts or loops.
+# Both are rendered idempotently (the template module only reports a change when
+# the produced bytes differ) and notify the validated-restart handler chain.
+- name: Generate dynamic configuration files from traefik_dynamic_configs
+  ansible.builtin.template:
+    src: dynamic-config.yml.j2
+    dest: "{{ traefik_dynamic_config_dir }}/{{ item.name }}{{ traefik_dynamic_configs_file_extension }}"
     owner: "{{ traefik_config_owner }}"
     group: "{{ traefik_config_group }}"
     mode: "{{ traefik_config_mode }}"
   loop: "{{ traefik_dynamic_configs }}"
   loop_control:
-    label: "{{ traefik_dynamic_config_dir }}/{{ item.name }}.yml"
+    label: "{{ traefik_dynamic_config_dir }}/{{ item.name }}{{ traefik_dynamic_configs_file_extension }}"
+  notify: validate_and_restart_traefik
+
+- name: Generate dynamic configuration from the custom Jinja2 template
+  ansible.builtin.template:
+    src: "{{ traefik_dynamic_configs_template }}"
+    dest: "{{ traefik_dynamic_config_dir }}/{{ traefik_dynamic_configs_template_name }}{{ traefik_dynamic_configs_file_extension }}"
+    owner: "{{ traefik_config_owner }}"
+    group: "{{ traefik_config_group }}"
+    mode: "{{ traefik_config_mode }}"
+  when: traefik_dynamic_configs_template | length > 0
+  notify: validate_and_restart_traefik
+
+# Cleanup symmetric to the "Remove default middlewares file..." task below:
+# when the option is unset the generated file must disappear, but a no-op
+# (file already absent) must not report "changed" — otherwise idempotence of
+# every plain run would break and the restart handler would fire needlessly.
+- name: Check whether the template-based dynamic config file exists
+  ansible.builtin.stat:
+    path: "{{ traefik_dynamic_config_dir }}/{{ traefik_dynamic_configs_template_name }}{{ traefik_dynamic_configs_file_extension }}"
+  register: dyn_template_stat
+  when: traefik_dynamic_configs_template | length == 0
+
+- name: Remove template-based dynamic config when the option is unset
+  ansible.builtin.file:
+    path: "{{ traefik_dynamic_config_dir }}/{{ traefik_dynamic_configs_template_name }}{{ traefik_dynamic_configs_file_extension }}"
+    state: absent
+  when:
+    - traefik_dynamic_configs_template | length == 0
+    - dyn_template_stat.stat.exists | default(false)
   notify: validate_and_restart_traefik
 
 - name: Render default middlewares file (security headers, https redirect)

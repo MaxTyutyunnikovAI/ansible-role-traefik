@@ -184,6 +184,9 @@ traefik_plugins: []
 # ----------------------------------------------------------------------------
 # DYNAMIC CONFIGURATION (File Provider). Each list item is rendered as a
 # separate YAML file into traefik_dynamic_config_dir via a loop in configure.yml
+# (templates/dynamic-config.yml.j2 -> `content` dict serialized with
+# to_nice_yaml; files are picked up by the file provider thanks to watch: true,
+# so a restart handler notification applies them without downtime).
 # ----------------------------------------------------------------------------
 traefik_dynamic_configs:
   - name: tls-options
@@ -206,6 +209,21 @@ traefik_dynamic_configs:
   #   content:
   #     http:
   #       routers: ...
+
+# ----------------------------------------------------------------------------
+# DYNAMIC CONFIGURATION — TEMPLATE-BASED GENERATION (optional)
+# Path to a custom Jinja2 template rendered into ONE extra dynamic-config file
+# in traefik_dynamic_config_dir. Use it when the declarative list is not enough:
+# inside the template you have access to all role variables, ansible_facts and
+# `traefik_dynamic_configs`, so routers/services/middlewares can be generated
+# dynamically (e.g. from a per-host inventory dict or a loop over facts).
+# Relative paths are resolved against the role's templates/ directory; absolute
+# paths on the controller work too. Empty string (default) -> feature disabled,
+# and any previously generated file is cleaned up idempotently.
+# ----------------------------------------------------------------------------
+traefik_dynamic_configs_template: ""           # e.g. "dynamic-routers.yml.j2"
+traefik_dynamic_configs_template_name: "90-generated"   # filename without extension
+traefik_dynamic_configs_file_extension: ".yml"          # File Provider watches *.yml/*.yaml
 
 # ----------------------------------------------------------------------------
 # OPTIONAL DEFAULT MIDDLEWARES (rendered into conf.d/00-default-middlewares.yml
