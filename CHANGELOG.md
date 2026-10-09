@@ -26,6 +26,15 @@
   `providers:` (старый вариант терял ключ провайдера в итоговом traefik.yml).
 
 ### Добавлено
+- **Генерация динамических конфигов из Jinja2-шаблона**: новые переменные
+  `traefik_dynamic_configs_template` (путь к шаблону, по умолчанию `""` — выключено),
+  `traefik_dynamic_configs_template_name` и `traefik_dynamic_configs_file_extension`;
+  `tasks/configure.yml` рендерит `conf.d/<name>.yml` идемпотентно, уведомляет цепочку
+  обработчиков валидации и удаляет сгенерированный файл при отключении опции.
+  Декларативный список `traefik_dynamic_configs` теперь рендерится через новый
+  `templates/dynamic-config.yml.j2`; образец шаблона — `templates/dynamic-routers.yml.j2`
+  (http.services/http.routers из словаря `traefik_generated_routers`). Документация —
+  в README («Динамическая конфигурация»).
 - Установка **плагинов Traefik v3** (trial-механизм + Traefik Pilot): переменные
   `traefik_pilot_enabled`, `traefik_pilot_token` (секрет — ansible-vault),
   `traefik_plugins` (`[{name, version, moduleName}]`), `traefik_plugins_dir`,
