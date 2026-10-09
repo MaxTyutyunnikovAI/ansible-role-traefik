@@ -4,7 +4,7 @@
 # ============================================================================
 
 # Version & download -------------------------------------------------------
-traefik_version: "v3.6.2"                      # pinned v3.x release tag
+traefik_version: "v3.7.14"                     # pinned v3.x release tag
 traefik_repo_url: "https://github.com/traefik/traefik"
 traefik_binary_url: "{{ traefik_repo_url }}/releases/download/{{ traefik_version }}/traefik_{{ traefik_version }}_linux_{{ go_arch }}.tar.gz"
 # Optional sha256 of the tarball (from the GitHub release checksums file).
@@ -117,17 +117,54 @@ traefik_static_config:
       directory: "{{ traefik_dynamic_config_dir }}"
       watch: true
 
-  # metrics:
-  #   prometheus:
-  #     addEntryPointsLabels: true
-  #     addRoutersLabels: true
-  #     addServicesLabels: true
-  # ping: {}                    # /ping health endpoint (useful for LB/monitoring)
-  # serversTransport:           # TLS settings for Traefik -> backends connections
-  #   insecureSkipVerify: false
-  #   maxIdleConnPerHost: 50
-  #   responseHeaderTimeout: 30s
-  #   handshakeTimeout: 10s
+# ----------------------------------------------------------------------------
+# OBSERVABILITY BLOCKS (rendered into the static config by templates/traefik.yml.j2
+# via combine(), exactly like certificatesResolvers/pilot — they override the
+# same keys inside traefik_static_config if you set them manually there).
+# ----------------------------------------------------------------------------
+
+# Prometheus metrics (traefik v3 `metrics.prometheus`).
+traefik_prometheus_enabled: false              # true -> metrics block on the entrypoint below
+traefik_prometheus_entrypoint: "metrics"       # dedicated entrypoint name; use "websecure" to reuse :443
+traefik_prometheus_buckets: [0.1, 0.3, 1.2, 5.0]  # request duration histogram buckets
+traefik_prometheus_entrypoint_labels: true
+traefik_prometheus_service_labels: true
+traefik_prometheus_router_labels: false        # high cardinality on many routers — opt-in
+traefik_prometheus_extra_props: {}             # e.g. {headerLabels: {...}, manualRouting: true}
+
+# /ping health endpoint (LB / monitoring probes). Independent of Prometheus —
+# do NOT nest it under the metrics condition (upstream role bug we avoided).
+traefik_ping_enabled: false
+traefik_ping_entrypoint: ""                    # "" -> default entrypoint; or set to an entrypoint name, e.g. "metrics"
+
+# serversTransport: TLS/timeout settings for Traefik -> backend connections.
+# Empty dict (default) -> no serversTransport block; every knob below is only
+# emitted when non-null/non-empty so partial overrides stay clean.
+traefik_servers_transport_name: "insecureInternal"  # key under serversTransport map
+traefik_servers_transport: {}                  # raw escape hatch, merged over the knobs below
+# traefik_servers_transport:
+#   insecureSkipVerify: true
+#   rootCAs: ["/etc/traefik/ca/internal.pem"]
+#   maxIdleConnPerHost: 50
+#   responseHeaderTimeout: "30s"
+#   forwardingTimeouts:
+#     dialTimeout: "30s"
+#     responseHeaderTimeout: "30s"
+#     idleConnTimeout: "60s"
+
+# DNS resolver behaviour (hostResolver) — needed for ACME DNS-challenge and
+# custom resolver chains.
+traefik_hostresolver: {}                       # e.g. {cnameFlattening: FULL, resolvConfig: /etc/resolv.conf, resolvDepth: 2}
+
+# Distributed tracing (OTLP/Jaeger/Zipkin/Datadog/Haystack/Instana/Elastic).
+# Only one exporter should be configured; `traefik_tracing_service` is required
+# when enabled. Extra props (per-exporter options) go to traefik_tracing_extra.
+traefik_tracing_enabled: false
+traefik_tracing_service: "traefik"
+traefik_tracing_span_name: "req {{ '{{'}} RouteName {{'}}' }}"  # literal Traefik template placeholders
+traefik_tracing_128bit_spans: false
+traefik_tracing_otlp: {}                       # e.g. {endpoint: "http://otel:4317", protocol: grpc, insecure: true}
+traefik_tracing_extra: {}                      # raw merge target for anything not covered above
 
 # ----------------------------------------------------------------------------
 # CERTIFICATE RESOLVERS (ACME / Let's Encrypt)
@@ -155,9 +192,19 @@ traefik_cert_resolvers: {}
 #       acme:
 #         email: ops@example.com
 #         storage: "{{ traefik_data_dir }}/acme.json"
+#         keyType: EC256                       # RSA2048 | EC256 | EC384 | RSA4096 | RSA8192
 #         dnsChallenge:
-#           provider: cloudflare
-#           delayBeforeCheck: 10
+#           provider: cloudflare               # any lego DNS provider (docs/README.acme-dns-providers)
+#           delayBeforeCheck: 10               # seconds; check propagation before hitting rate limits
+#           resolvers: ["1.1.1.1:53", "8.8.8.8:53"]
+#           disablePropagationCheck: false
+# Example (TLS-ALPN-01 over websecure — no extra port needed when :443 is served):
+#   traefik_cert_resolvers:
+#     letsencrypt:
+#       acme:
+#         email: ops@example.com
+#         storage: "{{ traefik_data_dir }}/acme.json"
+#         tlsChallenge: {}
 
 # ----------------------------------------------------------------------------
 # TRAEFIK PILOT & PLUGINS (trial mechanism)
@@ -248,3 +295,20 @@ traefik_default_middlewares:
     redirectScheme:
       scheme: https
       permanent: true
+
+# ----------------------------------------------------------------------------
+# DASHBOARD ROUTER & ACCESS CONTROL (dynamic config via File Provider)
+# When traefik_dashboard_enabled is true the role renders conf.d/05-dashboard.yml
+# exposing the API dashboard on the api entrypoint. With `api.insecure: false`
+# (the default) the dashboard is ONLY reachable through this router, so you can
+# protect it with basicAuth (traefik_dashboard_basic_auth -> the "dashboard-auth"
+# middleware in 00-default-middlewares.yml) and/or extra middlewares such as
+# ipAllowList. Set traefik_dashboard_entrypoint to an existing entryPoint name
+# (default: websecure).
+# ----------------------------------------------------------------------------
+traefik_dashboard_enabled: false
+traefik_dashboard_entrypoint: "websecure"
+traefik_dashboard_rule: "Host(`{{ traefik_dashboard_host | default('traefik.' + (ansible_facts['domain'] | default('localhost'))) }}`)"
+traefik_dashboard_middlewares: []              # e.g. ["dashboard-auth", "internal"]
+# Named IP allow-list middleware rendered together with the dashboard file:
+traefik_dashboard_trusted_ips: []              # e.g. ["10.0.0.0/8", "127.0.0.1/32"]

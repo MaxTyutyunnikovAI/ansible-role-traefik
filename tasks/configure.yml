@@ -118,6 +118,31 @@
   when: traefik_default_middlewares_enabled | bool
   notify: validate_and_restart_traefik
 
+# Dashboard router (File Provider dynamic config). Needed because the role's
+# default static config keeps `api.insecure: false`: with insecure off the
+# dashboard/api is ONLY reachable through a named router bound to an existing
+# entryPoint. Protect it via traefik_dashboard_middlewares (e.g. the
+# "dashboard-auth" basicAuth middleware or the "internal" ipAllowList built
+# from traefik_dashboard_trusted_ips).
+- name: Render dashboard router dynamic configuration
+  ansible.builtin.template:
+    src: dashboard-router.yml.j2
+    dest: "{{ traefik_dynamic_config_dir }}/05-dashboard.yml"
+    owner: "{{ traefik_config_owner }}"
+    group: "{{ traefik_config_group }}"
+    mode: "{{ traefik_config_mode }}"
+  when: traefik_dashboard_enabled | bool
+  notify: validate_and_restart_traefik
+
+- name: Remove dashboard router file when the option is disabled
+  ansible.builtin.file:
+    path: "{{ traefik_dynamic_config_dir }}/05-dashboard.yml"
+    state: absent
+  when: not (traefik_dashboard_enabled | bool)
+  changed_when: dash_file_result.stat.exists | default(false)
+  register: dash_file_result
+  notify: validate_and_restart_traefik
+
 - name: Remove default middlewares file when the option is disabled
   ansible.builtin.file:
     path: "{{ traefik_dynamic_config_dir }}/00-default-middlewares.yml"
