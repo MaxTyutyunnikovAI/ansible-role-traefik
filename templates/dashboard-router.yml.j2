@@ -1,0 +1,28 @@
+# Dynamic configuration file for the Traefik v3 File Provider (managed by Ansible).
+# Source: traefik_dashboard_* variables — exposes the API dashboard through a
+# named router on an existing entryPoint (required when api.insecure=false).
+# Optional protections: `dashboard-auth` basicAuth middleware (rendered into
+# 00-default-middlewares.yml from traefik_dashboard_basic_auth) and the
+# "internal" ipAllowList middleware built from traefik_dashboard_trusted_ips.
+http:
+{% if traefik_dashboard_trusted_ips | length > 0 %}
+  middlewares:
+    internal:
+      ipAllowList:
+        sourceRange:
+{% for ip in traefik_dashboard_trusted_ips %}
+          - "{{ ip }}"
+{% endfor %}
+{% endif %}
+  routers:
+    dashboard:
+      entryPoints:
+        - "{{ traefik_dashboard_entrypoint }}"
+      rule: "{{ traefik_dashboard_rule }}"
+      service: api@internal
+{% if traefik_dashboard_middlewares | length > 0 %}
+      middlewares:
+{% for mw in traefik_dashboard_middlewares %}
+        - "{{ mw }}"
+{% endfor %}
+{% endif %}

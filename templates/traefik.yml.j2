@@ -31,6 +31,35 @@
 {% for _p in traefik_plugins -%}
 {% set _plugins_dict = _plugins_dict | combine({ _p.name: {'moduleName': _p.moduleName, 'version': _p.version} }) -%}
 {% endfor -%}
+{#- Observability blocks (prometheus/ping/serversTransport/hostResolver/tracing).
+    Each is emitted only when its switch/dict is non-empty; they merge into the
+    static config via combine() like resolvers/pilot do. `ping` is deliberately
+    independent of the prometheus condition (upstream role had it nested — bug). -#}
+{% set _prom_block = {
+       'entryPoint': traefik_prometheus_entrypoint,
+       'buckets': traefik_prometheus_buckets,
+       'addEntryPointsLabels': traefik_prometheus_entrypoint_labels | bool,
+       'addServicesLabels': traefik_prometheus_service_labels | bool,
+       'addRoutersLabels': traefik_prometheus_router_labels | bool
+     } | combine(traefik_prometheus_extra_props) -%}
+{% set _metrics = {'prometheus': _prom_block} if (traefik_prometheus_enabled | bool) else {} -%}
+{% set _ping = ({'entryPoint': traefik_ping_entrypoint} if (traefik_ping_entrypoint | length > 0) else {}) if (traefik_ping_enabled | bool) else none -%}
+{% set _servers_transport = {traefik_servers_transport_name: traefik_servers_transport} if (traefik_servers_transport | length > 0) else {} -%}
+{% set _tracing = ({'service': traefik_tracing_service,
+                    'spanName': traefik_tracing_span_name,
+                    '128bitTraceIDs': traefik_tracing_128bit_spans | bool}
+                   | combine({'otlp': traefik_tracing_otlp} if (traefik_tracing_otlp | length > 0) else {})
+                   | combine(traefik_tracing_extra))
+                  if (traefik_tracing_enabled | bool) else {} -%}
+{#- When Prometheus listens on a dedicated entrypoint that is not defined in
+    traefik_static_config.entryPoints, add it automatically (:9090 by default
+    is NOT implied — metrics share the named entrypoint address; we create a
+    ":8082" metrics entrypoint only if the user did not define their own). -#}
+{% set _ep_name = traefik_prometheus_entrypoint -%}
+{% set _extra_ep = {} -%}
+{% if (traefik_prometheus_enabled | bool) and (_ep_name not in (traefik_static_config.get('entryPoints', {}) | default({}, true))) -%}
+{% set _extra_ep = {_ep_name: {'address': ':8082'}} -%}
+{% endif -%}
 {#- Pilot & plugins: the `pilot` static block is what makes the daemon fetch /
     refresh Yaegi plugin sources from pilot.traefik.io at startup; every plugin
     used by a middleware MUST also be declared under `experimental.plugins`.
@@ -43,7 +72,13 @@
                  | combine({'experimental': {'plugins': _plugins_dict}}
                            if (traefik_pilot_enabled | bool and traefik_plugins | length > 0) else {})
                  | combine({'certificatesResolvers': _resolvers}
-                           if (_resolvers | length > 0) else {}) -%}
+                           if (_resolvers | length > 0) else {})
+                 | combine({'entryPoints': _extra_ep} if (_extra_ep | length > 0) else {})
+                 | combine({'metrics': _metrics} if (_metrics | length > 0) else {})
+                 | combine({'ping': _ping} if (_ping is not none) else {})
+                 | combine({'serversTransport': _servers_transport} if (_servers_transport | length > 0) else {})
+                 | combine({'hostResolver': traefik_hostresolver} if (traefik_hostresolver | length > 0) else {})
+                 | combine({'tracing': _tracing} if (_tracing | length > 0) else {}) -%}
 # {{ ansible_managed }}
 # Generated from the "traefik_static_config" dictionary — do not edit by hand.
 {{ _static | to_nice_yaml(indent=2) }}
