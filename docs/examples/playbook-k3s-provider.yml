@@ -1,41 +1,59 @@
 ---
 # ============================================================================
-# Пример плейбука: Traefik v3 (systemd) + Kubernetes Provider (k3s)
+# Пример плейбука: Traefik v3 (systemd) + Kubernetes-провайдеры (k3s)
 # ----------------------------------------------------------------------------
 # Сценарий: сервер(ы) с k3s. Traefik работает как systemd-сервис на хосте
-# кластера и использует kubernetesprovider (Ingress/IngressClass, а также
-# CRD Traefik — IngressRoute/Middleware), читая конфигурацию через API-эндпоинт
-# kube-apiserver по kubeconfig со встроенным сервисным токеном.
+# кластера и подключается к kube-apiserver внешним клиентом провайдеров:
+# endpoint + SA-токен + CA-бандл (certAuthFilePath). Роль включает все три
+# провайдера разом (traefik_kubernetes_enabled): kubernetesIngress,
+# kubernetesCRD и kubernetesGateway — каждый дополнительно настраивается
+# своими переменными (см. defaults/main.yml роли).
 #
 # Особенности k3s:
 #   * в k3s уже встроен свой Traefik (Chart helm-install-traefik) — его нужно
 #     удалить, иначе два ingress-контроллера будут конфликтовать;
-#   * kubeconfig: /etc/rancher/k3s/k3s.yaml (сервер), сервисный namespace —
-#     kube-system, токен: secret traefik-service-account (создаём ниже);
-#   * юнит роли запускается от пользователя traefik, поэтому kubeconfig
-#     кладём в домашний каталог сервиса и выдаём права.
+#   * API: https://127.0.0.1:6443 (порт k3s https), сервисный namespace —
+#     kube-system, токен: secret из ServiceAccount `traefik` (создаём ниже);
+#   * в статике Traefik v3 НЕТ поля `kubeconfig` — v3 его отвергает с
+#     "field not found" (проверено на v3.7.14). Вместо kubeconfig-файла:
+#     endpoint+token+certAuthFilePath (здесь) либо env KUBECONFIG через
+#     traefik_envs;
+#   * ошибки инициализации kubernetes-провайдеров (недоступный API, нет CA)
+#     уходят только в лог-файл — они не видны в stderr и не могут сломать
+#     тайм-аутную пробу перезапуска роли.
 #
 # Запуск:
 #   ansible-playbook -i inventory.ini docs/examples/playbook-k3s-provider.yml
 # ============================================================================
 
-- name: Install Traefik with Kubernetes provider on a k3s server
+- name: Install Traefik with Kubernetes providers on a k3s server
   hosts: k3s_servers
   become: true
 
   vars:
-    traefik_version: v3.6.2
+    traefik_version: v3.7.14
 
-    # Настройки kubernetesprovider, смерживаются в providers (см. tasks ниже).
-    k8s_provider_opts:
-      # Единственный обрабатываемый IngressClass (в v3 по умолчанию включён
-      # режим ingressclass — Traefik игнорирует Ingress без него).
-      ingressClass: traefik
-      ingressClassResource:
-        name: traefik
-        default: false
-      # Watch ресурсы только в этих namespaces (пусто = все):
-      # watchNamespace: [default, ingress]
+    # ------------------------------------------------------------------
+    # Kubernetes-провайдеры (первоклассные переменные роли — merge
+    # traefik_static_config для k8s НЕ нужен; см. docs/README.md).
+    # ------------------------------------------------------------------
+    traefik_kubernetes_enabled: true
+    traefik_kubernetes_endpoint: "https://127.0.0.1:6443"
+    # Токен читается в tasks ниже (set_fact traefik_k8s_token); default('')
+    # нужен, чтобы vars шаблонизировались без ошибок до чтения secret.
+    traefik_kubernetes_token: "{{ traefik_k8s_token | default('') }}"
+    # CA кладём в каталог роли (юнит читает его от пользователя traefik;
+    # исходный /var/lib/rancher/k3s/... доступен только root).
+    traefik_kubernetes_cert_auth_file: "/etc/traefik/k3s-client-ca.crt"
+    traefik_kubernetes_ingress_class: "traefik"
+    traefik_kubernetes_crd_extra:
+      allowExternalNameServices: true
+      allowEmptyServices: true
+    # Фильтр по namespaces / label'ам — через per-provider extras:
+    #   traefik_kubernetes_ingress_extra: {namespaces: [default, ingress]}
+    # Внимание: опции строгие для каждого провайдера: allowExternalNameServices
+    # валиден только в kubernetesCRD и попадёт в kubernetesIngress — ошибка
+    # парсинга конфига ("field not found").
 
     # Динамическая конфигурация (File Provider) — TLS-настройки по умолчанию
     # и middlewares, доступные из Ingress-аннотаций как middleware@file.
@@ -97,6 +115,8 @@
 
     # ------------------------------------------------------------------
     # 2. Сервис-аккаунт и токен для доступа Traefik к API кластера.
+    #    В проде вместо cluster-admin — минимальный ClusterRole на чтение
+    #    ingress/services/secrets/ingressclasses + CRD traefik.io.
     # ------------------------------------------------------------------
     - name: Create Traefik service account
       ansible.builtin.command: k3s kubectl create serviceaccount traefik -n kube-system
@@ -117,7 +137,7 @@
         - "'already exists' not in _crb.stderr"
       changed_when: _crb.rc == 0
 
-    - name: Get a long-lived token secret for the Traefik service account
+    - name: Read the long-lived token of the Traefik service account
       ansible.builtin.shell: >-
         set -o pipefail &&
         k3s kubectl get secret -n kube-system
@@ -127,58 +147,47 @@
       changed_when: false
       no_log: true
 
-    # ------------------------------------------------------------------
-    # 3. Kubeconfig для systemd-сервиса traefik (указываем путь явно в
-    #    статической конфигурации провайдера — см. roles.kubernetesprovider.kubeconfig).
-    # ------------------------------------------------------------------
-    - name: Write kubeconfig for the Traefik daemon
-      ansible.builtin.copy:
-        dest: "{{ traefik_config_dir }}/k3s.kubeconfig"
-        owner: "{{ traefik_system_user }}"
-        group: "{{ traefik_system_group }}"
-        mode: "0600"
-        content: |
-          apiVersion: v1
-          kind: Config
-          clusters:
-            - name: default
-              cluster:
-                certificate-authority-data: {{ lookup('file', '/var/lib/rancher/k3s/server/tls/client-ca.crt') | b64encode }}
-                server: https://127.0.0.1:6443
-          users:
-            - name: system:serviceaccount:kube-system:traefik
-              user:
-                token: {{ _k8s_token.stdout }}
-          contexts:
-            - name: default
-              context:
-                cluster: default
-                user: system:serviceaccount:kube-system:traefik
+    - name: Set Traefik Kubernetes token fact
+      ansible.builtin.set_fact:
+        traefik_k8s_token: "{{ _k8s_token.stdout }}"
       no_log: true
 
     # ------------------------------------------------------------------
-    # 4. Применить роль: merge kubernetes provider в providers.
+    # 3. CA-бандл кластера — рядом с конфигом роли (0644), чтобы сервис
+    #    traefik мог прочитать его для проверки сертификата kube-apiserver.
     # ------------------------------------------------------------------
-    - name: Apply w0.traefik role with kubernetesprovider merged into providers
+    - name: Ensure Traefik config directory exists
+      ansible.builtin.file:
+        path: /etc/traefik
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Copy k3s CA certificate for Traefik
+      ansible.builtin.copy:
+        src: /var/lib/rancher/k3s/server/tls/client-ca.crt
+        dest: /etc/traefik/k3s-client-ca.crt
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+
+    # ------------------------------------------------------------------
+    # 4. Роль. Все k8s-переменные заданы в vars плейбука — merge
+    #    traefik_static_config больше не требуется: блок providers.kubernetes*
+    #    рендерит сама роль, file-provider и прочие провайдеры сохраняются.
+    #    Задача шаблона статики при непустом токене идёт с no_log.
+    # ------------------------------------------------------------------
+    - name: Apply w0.traefik role with Kubernetes providers enabled
       ansible.builtin.include_role:
         name: w0.traefik
-      vars:
-        # ВАЖНО: базой merge служит traefik_role_defaults.traefik_static_config
-        # (plain-копия дефолтов роли из vars/main.yml), а НЕ сама переменная
-        # traefik_static_config — ссылка на собственное определение (в том
-        # числе вида `traefik_static_config.providers | combine(...)`) создаёт
-        # цикл резолва переменных и падает с "maximum recursion depth exceeded
-        # while calling a Python object". Опции провайдера добавляются вложенно
-        # под ключ `providers.kubernetesprovider:`.
-        traefik_static_config: >-
-          {{ traefik_role_defaults.traefik_static_config
-             | combine({'providers': {'kubernetesprovider':
-                                        k8s_provider_opts
-                                        | combine({'kubeconfig': traefik_config_dir ~ '/k3s.kubeconfig'})
-                                     }}, recursive=True) }}
 
     # ------------------------------------------------------------------
     # 5. IngressClass и демо-Ingress (проверка работы провайдера).
+    #    Роль по умолчанию фильтрует по ingressClass=traefik — сам объект
+    #    IngressClass она в кластер не создаёт (кластерные манифесты вне
+    #    зоны роли): создаём здесь.
     # ------------------------------------------------------------------
     - name: Ensure Traefik IngressClass exists
       ansible.builtin.copy:
@@ -197,8 +206,8 @@
       ansible.builtin.command: k3s kubectl apply -f /tmp/traefik-ingressclass.yml
       changed_when: false
 
-    # CRD Traefik (IngressRoute/Middleware) ставит сам kubernetesprovider при
-    # первом подключении к API — ждём, затем объявляем demo-Middleware на плагине.
+    # CRD Traefik (IngressRoute/Middleware) ставит сам kubernetesCRD при первом
+    # подключении к API — ждём, затем объявляем demo-Middleware на плагине.
     - name: Wait for Traefik CRDs to be registered by the provider
       ansible.builtin.command: k3s kubectl wait --for condition=established --timeout=120s \
         crd/middlewares.traefik.io

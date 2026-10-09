@@ -1,7 +1,8 @@
 {#- Static Traefik v3 configuration. Declarative: the traefik_static_config
     dictionary is merged with computed blocks (certificatesResolvers from
     traefik_cert_resolvers / traefik_enable_acme, pilot/experimental.plugins
-    from traefik_pilot_enabled / traefik_plugins) and dumped via
+    from traefik_pilot_enabled / traefik_plugins, kubernetes providers from
+    traefik_kubernetes_*) and dumped via
     to_nice_yaml(indent=2), so overrides from inventory/group_vars behave
     predictably (dict merge/replace). -#}
 {#- IMPORTANT about Jinja whitespace control in this template: Ansible's
@@ -66,6 +67,36 @@
     The token is rendered into the config file (mode 0640, service owner) and
     consumed by both the daemon and the `traefik trial --download` pre-fetch. -#}
 {% set _pilot_block = {'token': traefik_pilot_token} | combine(traefik_pilot_extra_props) -%}
+{#- Kubernetes providers: one shared connection block + per-provider extras
+    (options are provider-specific — Traefik's strict parser rejects, say,
+    kubernetesCRD keys inside kubernetesIngress). The providers merge below
+    uses recursive=True so the file/docker providers already present in
+    traefik_static_config survive. ingressClass is valid for kubernetesIngress
+    and kubernetesCRD only; the Gateway provider selects GatewayClasses. -#}
+{% set _k8s_conn = {}
+       | combine({'endpoint': traefik_kubernetes_endpoint}
+                 if (traefik_kubernetes_endpoint | length > 0) else {})
+       | combine({'token': traefik_kubernetes_token}
+                 if (traefik_kubernetes_token | length > 0) else {})
+       | combine({'certAuthFilePath': traefik_kubernetes_cert_auth_file}
+                 if (traefik_kubernetes_cert_auth_file | length > 0) else {}) -%}
+{% set _k8s_class = {'ingressClass': traefik_kubernetes_ingress_class}
+       if (traefik_kubernetes_ingress_class | length > 0) else {} -%}
+{% set _k8s_providers = {}
+       | combine({'kubernetesIngress': _k8s_conn
+                                       | combine(_k8s_class)
+                                       | combine(traefik_kubernetes_ingress_extra)}
+                 if (traefik_kubernetes_enabled | bool
+                     and traefik_kubernetes_ingress_enabled | bool) else {})
+       | combine({'kubernetesCRD': _k8s_conn
+                                   | combine(_k8s_class)
+                                   | combine(traefik_kubernetes_crd_extra)}
+                 if (traefik_kubernetes_enabled | bool
+                     and traefik_kubernetes_crd_enabled | bool) else {})
+       | combine({'kubernetesGateway': _k8s_conn
+                                       | combine(traefik_kubernetes_gateway_extra)}
+                 if (traefik_kubernetes_enabled | bool
+                     and traefik_kubernetes_gateway_enabled | bool) else {}) -%}
 {% set _static = traefik_static_config
                  | combine({'pilot': _pilot_block}
                            if (traefik_pilot_enabled | bool and traefik_pilot_token | length > 0) else {})
@@ -73,12 +104,13 @@
                            if (traefik_pilot_enabled | bool and traefik_plugins | length > 0) else {})
                  | combine({'certificatesResolvers': _resolvers}
                            if (_resolvers | length > 0) else {})
-                 | combine({'entryPoints': _extra_ep} if (_extra_ep | length > 0) else {})
+                 | combine({'entryPoints': _extra_ep} if (_extra_ep | length > 0) else {}, recursive=True)
                  | combine({'metrics': _metrics} if (_metrics | length > 0) else {})
                  | combine({'ping': _ping} if (_ping is not none) else {})
                  | combine({'serversTransport': _servers_transport} if (_servers_transport | length > 0) else {})
                  | combine({'hostResolver': traefik_hostresolver} if (traefik_hostresolver | length > 0) else {})
-                 | combine({'tracing': _tracing} if (_tracing | length > 0) else {}) -%}
+                 | combine({'tracing': _tracing} if (_tracing | length > 0) else {})
+                 | combine({'providers': _k8s_providers} if (_k8s_providers | length > 0) else {}, recursive=True) -%}
 # {{ ansible_managed }}
 # Generated from the "traefik_static_config" dictionary — do not edit by hand.
 {{ _static | to_nice_yaml(indent=2) }}

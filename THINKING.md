@@ -128,6 +128,38 @@ provider или CRD Middleware в k8s).
 статической конфигурации); скачивание через `get_url` с GitHub (не соответствует контрактной
 механике trial и формату кэша daemon'а).
 
-## 10. Что можно улучшить (см. TODO.md)
+## 10. Kubernetes-провайдеры: подключение без kubeconfig и строгий парсинг
+**Решение**: k8s-провайдеры — первоклассенные переменные `traefik_kubernetes_*`,
+которые шаблон `traefik.yml.j2` вливает в существующий блок `providers` через
+`combine(..., recursive=True)` (file/docker и прочее не теряются). Connection =
+`endpoint` + `token` + `certAuthFilePath`; per-provider опции вынесены в отдельные
+словари `ingress/crd/gateway_extra`, потому что Traefik парсит статику строго.
+
+**Эмпирика (бинарник v3.7.14)**:
+- поля `kubeconfig` в статике НЕ существует: `{"level":"error","error":"field not
+  found, node: kubeconfig"}`, rc=1 → вся механика записи kubeconfig-файля ролью
+  отклонена; рабочие альтернативы — endpoint+token+certAuthFilePath (используется)
+  или env `KUBECONFIG` через `traefik_envs`;
+- валидность подтверждена прогоном: `ingressClass` у Ingress/CRD,
+  `experimentalChannel` у Gateway, `namespaces`, per-provider extras — конфиг
+  принимается (rc=124 по тайм-ауту, ноль строк ошибок);
+- ошибки инициализации провайдеров (отсутствующий CA, недоступный API) пишутся
+  ТОЛЬКО в `log.filePath` и не видны в stdout/stderr, демон продолжает работать
+  → проба перезапуска роли не видит состояние кластера и не делает ложный откат.
+
+**Почему per-provider extras**: `allowExternalNameServices`/`allowEmptyServices`
+валидны только для `kubernetesCRD`; общий `extra`-словарь для всех трёх провайдеров
+рано или поздно приведёт к `field not found` и откату конфигурации.
+
+**Альтернативы (отклонены)**: обвязка kubeconfig-файлами (поле отсутствует в v3);
+плоские переменные вида `traefik_kubernetes_crd_allow_external_name_services`
+(дублирование ×3 и жёсткая привязка к конкретным опциям, перенос в `*_extra` не
+требует изменения шаблона).
+
+**Кластерные манифесты — вне роли**: объект IngressClass, Gateway API CRDs и
+RBAC настраиваются плейбуком/инвентарём (пример `docs/examples/
+playbook-k3s-provider.yml`); роль только рендерит конфиг.
+
+## 11. Что можно улучшить (см. TODO.md)
 - Настроить `certificatesResolvers` для letsencrypt (сейчас указан, но не определён).
 - Расширить verify-тесты Molecule (ротация логов, поведение при битом конфиге).

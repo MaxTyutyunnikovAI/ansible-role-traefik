@@ -8,15 +8,16 @@
 | Файл | Провайдер | Сценарий |
 |------|-----------|----------|
 | [`playbook-docker-provider.yml`](examples/playbook-docker-provider.yml) | `docker` | Одиночный хост с Docker Engine; сервисы объявляются LABEL'ами контейнеров |
-| [`playbook-k3s-provider.yml`](examples/playbook-k3s-provider.yml) | `kubernetesprovider` | Сервер(ы) k3s; маршрутизация через Ingress / IngressClass и CRD Traefik |
+| [`playbook-k3s-provider.yml`](examples/playbook-k3s-provider.yml) | `kubernetesIngress` / `kubernetesCRD` / `kubernetesGateway` | Сервер(ы) k3s; маршрутизация через Ingress / IngressClass и CRD Traefik |
 
 Общие идеи
 ----------
 
-1. **Merge вместо переопределения.** Роль хранит статическую конфигурацию в
-   декларативном словаре `traefik_static_config`. Чтобы добавить провайдер и
-   не потерять дефолты (entryPoints, логи, api, file-provider), используется
-   рекурсивный `combine`. Базой merge служит **`traefik_role_defaults`** —
+1. **Merge для Docker, первоклассные переменные для Kubernetes.**
+   Роль хранит статическую конфигурацию в декларативном словаре
+   `traefik_static_config`. Провайдер **docker** добавляется через
+   рекурсивный `combine` (дефолты не теряются: entryPoints, логи, api,
+   file-provider). Базой merge служит **`traefik_role_defaults`** —
    plain-копия дефолтов роли (`vars/main.yml`):
 
    ```yaml
@@ -27,10 +28,11 @@
    ```
 
    Обратите внимание: опции провайдера добавляются **вложенно** под ключом
-   `providers.docker:` (для Kubernetes — `providers.kubernetesprovider:`).
-   Если писать `... .providers | combine(docker_provider_opts)`, опции
-   (`endpoint`, `network` и т.п.) попадут в корень секции `providers:` вместо
-   `providers.docker:`, и Traefik их проигнорирует.
+   `providers.docker:` — если писать `... .providers | combine(docker_provider_opts)`,
+   опции (`endpoint`, `network` и т.п.) попадут в корень секции `providers:`
+   вместо `providers.docker:`, и Traefik их проигнорирует.
+   Для Kubernetes merge не нужен: блоки `providers.kubernetesIngress/CRD/Gateway`
+   рендерит сама роль по переменным `traefik_kubernetes_*` (см. пример k3s).
 
    > ⚠️ Нельзя писать `{{ traefik_static_config | combine(...) }}` (или
    > `{{ traefik_static_config.providers | combine(...) }}`) внутри
@@ -70,9 +72,15 @@
 3. **Безопасность юнита.** Закалённый systemd-юнит роли (`ProtectSystem`,
    `NoNewPrivileges`, ограниченные capabilities) требует точечных поблажек для
    доступа к `/var/run/docker.sock` или API kube-apiserver — в примерах они
-   оформлены через `traefik_extra_capabilities` / `traefik_extra_unit_vars` и
-   отдельный kubeconfig с сервисным токеном (не cluster-admin в проде —
-   достаточно прав на чтение ingress/service/secret + обновление status).
+   оформлены через `traefik_extra_capabilities` / `traefik_extra_unit_vars`.
+   Для k8s-подключения kubeconfig-файл не нужен: в статике Traefik v3 нет
+   поля `kubeconfig` (v3 его отвергает — `field not found`, проверено на
+   v3.7.14), а внешний клиент описывается переменными роли
+   `traefik_kubernetes_endpoint/token/cert_auth_file`; токен — секрет
+   (ansible-vault, задача шаблона статики идёт с `no_log`). Не
+   cluster-admin в проде — достаточно прав на чтение
+   ingress/service/secret/ingressclass + CRD traefik.io и обновление
+   ingress/status.
 
 4. **ACME.** В обоих примерах включён HTTP-01 через `traefik_enable_acme` и
    `traefik_cert_resolvers`; для DNS-01 токены прокидываются через
@@ -115,10 +123,15 @@ ansible-playbook -i inventory.ini --vault-id @prompt docs/examples/playbook-k3s-
   * сначала удаляет встроенный Traefik из k3s (`k3s helm uninstall traefik -n kube-system`),
     иначе два ingress-контроллера будут конфликтовать (в k3s также можно
     поставить флаг установки `--disable=traefik`);
-  * создаёт ServiceAccount `traefik` в `kube-system` и long-lived токен, из
-    которого генерируется `/etc/traefik/k3s.kubeconfig` (права `0600`,
-    владелец — пользователь сервиса);
-  * `kubernetesprovider` ходит в API через `https://127.0.0.1:6443`.
+  * создаёт ServiceAccount `traefik` в `kube-system`, читает его long-lived
+    токен (set_fact, `no_log`) и копирует CA кластера в
+    `/etc/traefik/k3s-client-ca.crt` (`0644`) — эти значения подставляются
+    в переменные роли `traefik_kubernetes_token` / `traefik_kubernetes_cert_auth_file`;
+  * роль включает все три kubernetes-провайдера (`traefik_kubernetes_enabled`)
+    с endpoint `https://127.0.0.1:6443`; ошибки провайдеров при недоступном
+    API попадают только в лог-файл и не срывают пробу перезапуска;
+  * объект IngressClass (`traefik`) и demo-манифесты применяет сам плейбук —
+    роль кластерные ресурсы не создаёт.
 * Хост-группы в примерах: `traefik` (docker) и `k3s_servers` (k3s) —
   приведите их к своему inventory.
 * Проверка синтаксиса:

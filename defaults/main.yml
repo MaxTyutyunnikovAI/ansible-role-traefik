@@ -133,6 +133,56 @@ traefik_static_config:
       watch: true
 
 # ----------------------------------------------------------------------------
+# KUBERNETES PROVIDERS (kubernetesIngress / kubernetesCRD / kubernetesGateway)
+# Rendered into the static config by templates/traefik.yml.j2 and MERGED into
+# the existing providers block (recursive combine) — the file provider and any
+# hand-merged providers (docker etc.) are preserved.
+#
+# Typical k3s host scenario (Traefik as a systemd service on the cluster
+# node, k3s bundled traefik disabled):
+#   traefik_kubernetes_enabled: true
+#   traefik_kubernetes_endpoint: "https://127.0.0.1:6443"
+#   traefik_kubernetes_token: "{{ traefik_k8s_token }}"          # or a file path
+#   traefik_kubernetes_cert_auth_file: "/var/lib/rancher/k3s/server/tls/client-ca.crt"
+#   traefik_kubernetes_crd_extra: {allowExternalNameServices: true, allowEmptyServices: true}
+#
+# Connection model (Traefik v3): the static config has NO `kubeconfig` field
+# (v3 rejects it with "field not found" — empirically verified on v3.7.14).
+# An external client is configured with endpoint + token + certAuthFilePath;
+# without them Traefik falls back to the in-cluster service account, and the
+# KUBECONFIG environment variable (via traefik_envs) can still supply the
+# endpoint. `traefik_kubernetes_token` accepts the token VALUE or a path to a
+# file containing it (Traefik v3.7+); it is a secret — the template task sets
+# no_log while it is non-empty.
+#
+# Provider connection errors (bad token, unreachable API) are logged to the
+# configured log FILE only, never to stderr — the startup probe therefore
+# does not treat an unreachable cluster as a broken configuration.
+#
+# Provider-specific options live in per-provider *_extra dicts ON PURPOSE:
+# Traefik parses static config strictly, so an option valid only for
+# kubernetesCRD (e.g. allowExternalNameServices) must not leak into the
+# kubernetesIngress/kubernetesGateway blocks.
+# ----------------------------------------------------------------------------
+traefik_kubernetes_enabled: false             # master switch for all k8s providers
+traefik_kubernetes_ingress_enabled: true      # providers.kubernetesIngress
+traefik_kubernetes_crd_enabled: true          # providers.kubernetesCRD
+traefik_kubernetes_gateway_enabled: true      # providers.kubernetesGateway (needs Gateway API CRDs)
+
+# Connection (shared by every enabled provider).
+traefik_kubernetes_endpoint: ""               # e.g. https://127.0.0.1:6443 (k3s api)
+traefik_kubernetes_token: ""                  # value or file path; keep in ansible-vault
+traefik_kubernetes_cert_auth_file: ""         # CA bundle path (certAuthFilePath)
+
+# Routing filters.
+traefik_kubernetes_ingress_class: "traefik"   # "" -> no class filter (Ingress + CRD only)
+
+# Provider-specific options (merged over the connection block, per provider).
+traefik_kubernetes_ingress_extra: {}          # e.g. {namespaces: [default], labelSelector: "app=traefik"}
+traefik_kubernetes_crd_extra: {}              # e.g. {allowExternalNameServices: true, allowEmptyServices: true}
+traefik_kubernetes_gateway_extra: {}          # e.g. {experimentalChannel: true}
+
+# ----------------------------------------------------------------------------
 # OBSERVABILITY BLOCKS (rendered into the static config by templates/traefik.yml.j2
 # via combine(), exactly like certificatesResolvers/pilot — they override the
 # same keys inside traefik_static_config if you set them manually there).

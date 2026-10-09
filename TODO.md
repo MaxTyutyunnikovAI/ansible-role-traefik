@@ -9,6 +9,9 @@
 ## Средний приоритет
 - [ ] Опциональная настройка middleware по умолчанию (compress, headers, rate-limit) в динамической конфигурации.
 - [ ] Документировать схему миграции с предыдущих версий роли (изменения структуры переменных) в README.
+- [ ] Molecule/k3s-smoke: проверка рендера статики с `traefik_kubernetes_enabled` валидностью
+      бинарником (без реального API — ошибки провайдеров уходят в лог-файл) и без
+      регистрации IngressClass/Gateway API (кластерные манифесты вне зоны роли).
 
 ## Низкий приоритет
 - [ ] Метрики (Prometheus entryPoint) как опция через переменную.
@@ -28,6 +31,10 @@
 - [x] Секреты `traefik_envs` — в root-файле `traefik.env` (0600) через `EnvironmentFile`
   вместо `Environment=` в world-readable юните (0644).
 - [x] Закреплённая версия Traefik обновлена до `v3.7.14` (включая molecule/README/CHANGELOG).
+- [x] Первоклассенные переменные kubernetes-провайдеров `traefik_kubernetes_*`
+      (Ingress/CRD/Gateway, connection endpoint+token+certAuthFilePath, per-provider
+      extras); пример k3s переписан под них — в статике Traefik v3 нет поля
+      `kubeconfig` (см. `THINKING.md`, раздел 10).
 - [x] Применение `traefik_extra_unit_vars` в шаблоне `traefik.service.j2`.
 - [x] Поддержка Docker/Kubernetes provider'ов — через документированные примеры merge в `traefik_static_config` (`docs/examples/`).
 - [x] Установка плагинов Traefik v3 (pilot + experimental.plugins + предзагрузка `traefik trial --download`).

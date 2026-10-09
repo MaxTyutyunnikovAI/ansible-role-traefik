@@ -10,6 +10,7 @@ Ansible-роль для установки Traefik v3 в качестве system
 * Создание системных группы и пользователя `traefik`, каталогов `/etc/traefik`, `/var/log/traefik`, `/var/lib/traefik`.
 * Декларативная статическая конфигурация (`traefik_static_config` → YAML через `to_nice_yaml`).
 * Динамическая конфигурация через File Provider (`traefik_dynamic_configs` → отдельные файлы в `conf.d/` с `watch: true`).
+* Подключение к Kubernetes/k3s: первоклассенные переменные `traefik_kubernetes_*` включают `kubernetesIngress`, `kubernetesCRD` и `kubernetesGateway` (endpoint + SA-токен + CA; в статике Traefik v3 нет поля `kubeconfig`).
 * Закалённый (hardened) systemd-юнит: `NoNewPrivileges`, `ProtectSystem`, `PrivateTmp`, `CAP_NET_BIND_SERVICE` и т.д.
 * Перезапуск сервиса **только после** успешной проверки новой конфигурации тайм-аутным пробным запуском (обработчик-цепочка `validate_and_restart_traefik`): конфигурация парсится, демоны переживают >= N секунд и не пишут ошибок → старт; иначе — откат на `traefik.yml.bak` и прерывание плейбока. «битая» конфигурация никогда не поднимет сервис (у Traefik v3 нет офлайн-режима `--check`, см. `THINKING.md`).
 * Секреты (`traefik_envs`, например `CF_API_TOKEN`) вынесены в root-файл `traefik.env` (mode `0600`) и подключаются через `EnvironmentFile` — в world-readable юнит (0644) они не попадают.
@@ -70,6 +71,19 @@ traefik_pilot_enabled: false          # true -> блоки pilot/experimental.pl
 traefik_pilot_token: ""               # TRIAL-токен с pilot.traefik.io (хранить в ansible-vault)
 traefik_plugins: []                   # [{name, version, moduleName}] — предзагрузка `traefik trial --download`
 traefik_plugins_dir: "/etc/traefik/plugins-trial"   # кэш исходников Yaegi-плагинов
+
+# Kubernetes-провайдеры (k3s и др.) — см. docs/examples/playbook-k3s-provider.yml
+traefik_kubernetes_enabled: false      # true -> все три провайдера в статике (см. *_enabled ниже)
+traefik_kubernetes_ingress_enabled: true
+traefik_kubernetes_crd_enabled: true
+traefik_kubernetes_gateway_enabled: true   # требует Gateway API CRDs в кластере
+traefik_kubernetes_endpoint: ""            # https://127.0.0.1:6443 (API k3s)
+traefik_kubernetes_token: ""               # значение или путь к файлу (v3.7+); секрет → no_log
+traefik_kubernetes_cert_auth_file: ""      # CA-бандл (certAuthFilePath)
+traefik_kubernetes_ingress_class: "traefik"   # "" -> без фильтра по классу
+traefik_kubernetes_ingress_extra: {}       # опции только kubernetesIngress
+traefik_kubernetes_crd_extra: {}           # только kubernetesCRD (allowExternalNameServices и т.п.)
+traefik_kubernetes_gateway_extra: {}       # только kubernetesGateway
 
 # Logrotate
 traefik_logrotate_enabled: true
@@ -172,7 +186,7 @@ traefik_generated_routers:
 плагинов — в каталоге [`docs/`](docs/README.md):
 
 * `docs/examples/playbook-docker-provider.yml` — Docker Provider + LABEL'ы контейнеров + плагин (`experimental.plugins`, `traefik trial --download`);
-* `docs/examples/playbook-k3s-provider.yml` — Kubernetes Provider на базе k3s (Ingress/IngressClass) + CRD-Middleware на плагине.
+* `docs/examples/playbook-k3s-provider.yml` — Kubernetes-провайдеры (Ingress/CRD/Gateway) на базе k3s через переменные `traefik_kubernetes_*` + CRD-Middleware на плагине.
 
 Тестирование
 ------------

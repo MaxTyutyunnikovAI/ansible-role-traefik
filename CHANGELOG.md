@@ -6,6 +6,26 @@
 
 ## [Не выпущено]
 
+### Добавлено
+- **Первоклассная поддержка Kubernetes/k3s**: переменные `traefik_kubernetes_*`
+  (`traefik_kubernetes_enabled` + по-провайдерные `ingress/crd/gateway_enabled`,
+  connection `endpoint`/`token`/`cert_auth_file`, `ingress_class`, per-provider
+  `ingress/crd/gateway_extra`) рендерятся шаблоном статики в блоки
+  `providers.kubernetesIngress/CRD/Gateway` через рекурсивный `combine` —
+  file-провайдер и вручную влитые провайдеры (docker и т.п.) сохраняются.
+  Опции разделены по провайдерам намеренно: Traefik парсит статику строго, и
+  чужой ключ (например `allowExternalNameServices` вне `kubernetesCRD`) валит
+  демон с `field not found`. В статике Traefik v3 **нет поля `kubeconfig`**
+  (проверено на v3.7.14) — внешний клиент задаётся только
+  endpoint+token+certAuthFilePath (альтернатива — env `KUBECONFIG` через
+  `traefik_envs`); ошибки инициализации провайдеров идут в лог-файл и не видны
+  в stderr, поэтому не влияют на тайм-аутную пробу перезапуска. Токен
+  попадает в статику → задача шаблона автоматически идёт с `no_log` при
+  непустом `traefik_kubernetes_token`. Пример
+  `docs/examples/playbook-k3s-provider.yml` переписан под новые переменные
+  (старый использовал несуществующий ключ `kubernetesprovider` и невалидный
+  kubeconfig), README дополнен описанием переменных.
+
 ### Исправлено
 - **Цепочка валидации перезаписана под Traefik v3**: офлайн-режима `--check` в v3 не
   существует (без `--configFile` — ошибка `field not found, node: check`; с `--configFile`
@@ -29,6 +49,9 @@
   `regex_search('Version:\s*\S+')` + `regex_replace`; отсутствие совпадения → переустановка.
 - Копирование бинарника теперь уведомляет `validate_and_restart_traefik` — новый демон
   реально подменяет работающий (перезапуск по-прежнему только после успешной пробы).
+- Merge опций entry point-ов (`combine({'entryPoints': ...})`) стал рекурсивным: при
+  добавлении одной опции (например prometheus-эндпоинта) без metrics-entrypoint раньше
+  перетирались ВСЕ entryPoints из дефолтной статики.
 - Убраны мёртвые `changed_when: *.stat.exists` и регистрирующие `stat` у задач
   `state: absent` (`file: state=absent` идемпотентен нативно); убран мёртвый `when`
   внутри элементов loop (условие per-item Ansible не поддерживает — каталог плагинов

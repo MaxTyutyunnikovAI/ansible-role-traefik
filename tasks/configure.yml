@@ -19,8 +19,10 @@
     # temp file). The authoritative gate is the handler chain (see the notify
     # below): it stops the service, probes the final file with a timed
     # startup and rolls back to <config>.bak if the probe fails.
-  # The rendered config can contain the pilot TRIAL token — censor the task.
-  no_log: "{{ traefik_pilot_token | length > 0 }}"
+  # The rendered config can contain the pilot TRIAL token or the Kubernetes
+  # bearer token (providers.*.token) — censor the task while either is set.
+  no_log: "{{ (traefik_pilot_token | length > 0)
+              or (traefik_kubernetes_token | length > 0) }}"
   notify: validate_and_restart_traefik
 
 # --- Environment file with secrets (systemd EnvironmentFile) ----------------
