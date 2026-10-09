@@ -4,36 +4,58 @@
     blocks (certificatesResolvers from traefik_cert_resolvers / traefik_enable_acme)
     and dumped via to_nice_yaml(indent=2), so overrides from inventory/group_vars
     behave predictably (dict merge/replace).
+
+    IMPORTANT — every Jinja statement/block tag below uses explicit whitespace
+    control ({%- ... -%}) on BOTH sides. Ansible's template environment does NOT
+    enable trim_blocks/lstrip_blocks unless ANSIBLE_JINJA2_ENVIRONMENT_SETTINGS
+    or a jinja2_native-style env plugin opts in, so with plain {% ... %} tags on
+    their own lines the trailing newline of each tag line is emitted into the
+    output: the two comment lines then end up glued to the first YAML key
+    ("...do not edit by hand.accessLog:") and the document tail after the
+    leftover blank lines parses as a SECOND YAML document. `traefik --check`
+    reads only the first document, finds no valid keys there and aborts the
+    handler chain with:
+      "no valid configuration found in file: /etc/traefik/traefik.yml"
 -#}
 # {{ ansible_managed }}
 # Generated from the "traefik_static_config" dictionary — do not edit by hand.
+{#- All Jinja statement tags are placed INSIDE the line they follow (at its
+    end) rather than on their own lines. Reason: even with `{%- -%}` whitespace
+    control, some Ansible/Jinja environments (varying trim_blocks/lstrip_blocks
+    defaults or template preprocessing) can still leak the tag's newline into
+    the output — which glues the header comments to the first YAML key and
+    splits the file into two YAML documents. `traefik --check` then reads only
+    the comment-only first document and fails with
+    "no valid configuration found in file: /etc/traefik/traefik.yml".
+    Inline placement makes correct rendering independent of env settings. -#}
 {#- Resolver precedence: explicit traefik_cert_resolvers wins; otherwise the
     convenience switch traefik_enable_acme injects a default HTTP-01 resolver;
-    otherwise no certificatesResolvers block is emitted at all. -#}
-{% set _resolvers = traefik_cert_resolvers
-                    if (traefik_cert_resolvers | length > 0)
-                    else (traefik_default_acme_resolver if (traefik_enable_acme | bool) else {}) %}
-{#- Pilot & plugins: the `pilot` static block is what makes the daemon fetch /
+    otherwise no certificatesResolvers block is emitted at all. -#}{%
+  set _resolvers = traefik_cert_resolvers
+                   if (traefik_cert_resolvers | length > 0)
+                   else (traefik_default_acme_resolver if (traefik_enable_acme | bool) else {}) %}{#
+#}{#- Pilot & plugins: the `pilot` static block is what makes the daemon fetch /
     refresh Yaegi plugin sources from pilot.traefik.io at startup; every plugin
     used by a middleware MUST also be declared under `experimental.plugins`.
     The token is rendered into the config file (mode 0640, service owner) and
-    consumed by both the daemon and the `traefik trial --download` pre-fetch. -#}
-{%- set _plugins_dict = {} %}
-{%- for _p in traefik_plugins %}
-{%-   set _plugins_dict = _plugins_dict | combine({
-          _p.name: {'moduleName': _p.moduleName, 'version': _p.version}
-      }) %}
-{%- endfor %}
-{% set _static = traefik_static_config
-                 | combine(
-                     {'pilot': dict({'token': traefik_pilot_token}, traefik_pilot_extra_props)}
-                     if (traefik_pilot_enabled | bool and traefik_pilot_token | length > 0) else {}
-                   )
-                 | combine(
-                     {'experimental': {'plugins': _plugins_dict}}
-                     if (traefik_pilot_enabled | bool and traefik_plugins | length > 0) else {}
-                   )
-                 | combine(
-       {'certificatesResolvers': _resolvers} if (_resolvers | length > 0) else {}
-   ) %}
+    consumed by both the daemon and the `traefik trial --download` pre-fetch. -#}{%
+  set _plugins_dict = {} %}{%
+  for _p in traefik_plugins %}{%
+    set _plugins_dict = _plugins_dict | combine({
+      _p.name: {'moduleName': _p.moduleName, 'version': _p.version}
+    }) %}{%
+  endfor %}{%
+  set _pilot_block = {'token': traefik_pilot_token} | combine(traefik_pilot_extra_props) %}{%
+  set _static = traefik_static_config
+                | combine(
+                    {'pilot': _pilot_block}
+                    if (traefik_pilot_enabled | bool and traefik_pilot_token | length > 0) else {}
+                  )
+                  | combine(
+                      {'experimental': {'plugins': _plugins_dict}}
+                      if (traefik_pilot_enabled | bool and traefik_plugins | length > 0) else {}
+                    )
+                  | combine(
+        {'certificatesResolvers': _resolvers} if (_resolvers | length > 0) else {}
+    ) -%}
 {{ _static | to_nice_yaml(indent=2) }}
