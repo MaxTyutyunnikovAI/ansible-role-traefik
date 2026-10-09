@@ -70,9 +70,12 @@ ReadWritePaths={{ traefik_plugins_dir }}
 {{ key }}={{ value }}
 {% endfor %}
 
-# /run is always writable even under ProtectSystem, so no ReadWritePaths entry
-# is needed for it. The pidfile below is consumed by the logrotate postrotate
-# hook (see traefik-logrotate.j2) to send SIGUSR1 without restarting Traefik.
+# RuntimeDirectory makes systemd create /run/<service> (owned by the service
+# user) before ExecStart runs — without it the pgrep redirect in ExecStartPost
+# fails with "cannot create /run/traefik/traefik.pid: Directory nonexistent".
+# The pidfile below is consumed by the logrotate postrotate hook (see
+# traefik-logrotate.j2) to send SIGUSR1 without restarting Traefik.
+RuntimeDirectory={{ traefik_service_name }}
 ExecStartPost=/bin/sh -c 'pgrep -f "{{ traefik_bin_dir }}/traefik" > /run/{{ traefik_service_name }}/{{ traefik_service_name }}.pid'
 PIDFile=/run/{{ traefik_service_name }}/{{ traefik_service_name }}.pid
 
