@@ -25,6 +25,13 @@
   `docs/examples/playbook-k3s-provider.yml` переписан под новые переменные
   (старый использовал несуществующий ключ `kubernetesprovider` и невалидный
   kubeconfig), README дополнен описанием переменных.
+- **Алиас `traefik_dashboard_users` для базовой аутентификации дашборда**:
+  переменная с именем из роли `traefik2`/`rolehippie.traefik` (тот же формат
+  htpasswd-строк `user:hash`) теперь принимается и этой ролью — значение
+  подставляется в default переменной `traefik_dashboard_basic_auth`,
+  поэтому старые var'ы работают без правок; при задании обоих приоритет у
+  `traefik_dashboard_basic_auth`. В middleware `dashboard-auth` добавлен
+  `realm: Traefik` (паритет с traefik2 — окно авторизации подписано «Traefik»).
 
 ### Исправлено
 - **Цепочка валидации перезаписана под Traefik v3**: офлайн-режима `--check` в v3 не

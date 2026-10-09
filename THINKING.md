@@ -160,6 +160,24 @@ provider или CRD Middleware в k8s).
 RBAC настраиваются плейбуком/инвентарём (пример `docs/examples/
 playbook-k3s-provider.yml`); роль только рендерит конфиг.
 
-## 11. Что можно улучшить (см. TODO.md)
+## 11. Дашборд: алиас `traefik_dashboard_users` вместо переименования
+- Роль traefik2/rolehippie питает basicAuth дашборда переменной
+  `traefik_dashboard_users` (список htpasswd-строк `user:hash`); в traefik3 та же
+  семантика называется `traefik_dashboard_basic_auth`. Два имени на одно свойство —
+  источник путаницы при миграции плейбуков.
+- Решение: **алиас, а не переименование** — правило AGENTS «не ломать контракт
+  переменных»: `traefik_dashboard_basic_auth` остаётся каноническим именем, его
+  default становится мостом `"{{ traefik_dashboard_users }}"`. Задан только один
+  из двух — работает любой; заданы оба — выигрывает `traefik_dashboard_basic_auth`
+  (обычная precedence варсов, без combine-магии).
+- `realm: Traefik` добавлен в middleware — окно авторизации подписывается так же,
+  как в traefik2 (косметика, но единообразие миграции).
+- ipAllowList (`traefik_dashboard_trusted_ips`) в первом подключении сознательно
+  не задавался: middleware `internal` рендерится только при непустом списке, а
+  ссылка на непустой `traefik_dashboard_middlewares` с несуществующим middleware
+  ломает роутер — список и источники должны меняться парно (это задокументировано
+  в комментарии плейбука `playbooks/server-ru/_traefik.yml`).
+
+## 12. Что можно улучшить (см. TODO.md)
 - Настроить `certificatesResolvers` для letsencrypt (сейчас указан, но не определён).
 - Расширить verify-тесты Molecule (ротация логов, поведение при битом конфиге).

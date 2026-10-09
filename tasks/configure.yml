@@ -140,7 +140,8 @@
     # list would make the router reject every request).
     _middlewares: >-
       {{ traefik_default_middlewares
-         | combine(({'dashboard-auth': {'basicAuth': {'users': traefik_dashboard_basic_auth}}}
+         | combine(({'dashboard-auth': {'basicAuth': {'users': traefik_dashboard_basic_auth,
+                                                      'realm': 'Traefik'}}}
                     if (traefik_dashboard_basic_auth | length > 0) else {})) }}
   when: traefik_default_middlewares_enabled | bool
   notify: validate_and_restart_traefik

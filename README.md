@@ -85,6 +85,15 @@ traefik_kubernetes_ingress_extra: {}       # опции только kubernetesI
 traefik_kubernetes_crd_extra: {}           # только kubernetesCRD (allowExternalNameServices и т.п.)
 traefik_kubernetes_gateway_extra: {}       # только kubernetesGateway
 
+# Дашборд (conf.d/05-dashboard.yml при traefik_dashboard_enabled=true)
+traefik_dashboard_enabled: false        # true -> роутер dashboard -> api@internal (нужен при api.insecure=false)
+traefik_dashboard_host: ""              # Host(...) правила — задавайте явно; иначе traefik.<ansible_facts.domain>
+traefik_dashboard_entrypoint: "websecure"
+traefik_dashboard_middlewares: []       # e.g. ["dashboard-auth", "internal"]
+traefik_dashboard_users: []             # htpasswd-строки ["admin:$2b$..."] — алиас из роли traefik2
+traefik_dashboard_basic_auth: "{{ traefik_dashboard_users }}"  # dashboard-auth в 00-default-middlewares.yml; приоритет при задании обоих
+traefik_dashboard_trusted_ips: []       # ipAllowList -> middleware "internal" (в middlewares — первым)
+
 # Logrotate
 traefik_logrotate_enabled: true
 traefik_logrotate_frequency: "daily"
