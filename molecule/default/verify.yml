@@ -28,7 +28,9 @@
         that:
           - >-
             (traefik_version[1:] if traefik_version is match('^v') else traefik_version)
-            == ((traefik_ver.stdout | regex_search('Version:\s*(\S+)', '\\1')) | default('', true))
+            == ((traefik_ver.stdout | default('')
+                 | regex_search('Version:\s*\S+') | default('', true)
+                 | regex_replace('^Version:\s*', '')))
         fail_msg: "Expected {{ traefik_version }}, got: {{ traefik_ver.stdout }}"
 
     - name: Check static configuration file exists

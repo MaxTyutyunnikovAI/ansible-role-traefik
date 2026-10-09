@@ -88,16 +88,24 @@
 # `traefik version` prints "Version:  3.6.2" WITHOUT the leading "v" of the
 # git tag, so the tag is stripped and the version is extracted with an exact
 # regex — a plain substring check would treat 3.7.1 as satisfied by 3.7.14.
+# The version is extracted WITHOUT a regex_search backref argument: the
+# backref form parses its "\1" argument differently across Ansible versions
+# (AttributeError on some) and returns a list on others, which made the
+# comparison always unequal. regex_search on a group-less pattern returns a
+# plain string (or None on no match -> "" -> reinstall, fail-safe).
 - name: Determine if Traefik binary must be (re)installed
   ansible.builtin.set_fact:
     traefik_needs_install: >-
       {{ not (traefik_binary_stat.stat.exists | bool)
-         or ((traefik_installed_version.stdout | default('')
-              | regex_search('Version:\s*(\S+)', '\\1') | default('', true))
-             != (_traefik_want_version)) }}
+         or ((_traefik_installed_version | trim) != (_traefik_want_version | trim)) }}
   vars:
     _traefik_want_version: >-
       {{ traefik_version[1:] if traefik_version is match('^v') else traefik_version }}
+    _traefik_installed_version: >-
+      {{ (traefik_installed_version.stdout | default('')
+          | regex_search('Version:\s*\S+')
+          | default('', true)
+          | regex_replace('^Version:\s*', '')) }}
 
 - name: Download and unpack Traefik release tarball from GitHub
   when: traefik_needs_install | bool
