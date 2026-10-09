@@ -20,6 +20,9 @@ traefik_system_group: "traefik"
 traefik_bin_dir: "/usr/local/bin"
 traefik_config_dir: "/etc/traefik"
 traefik_static_config_file: "{{ traefik_config_dir }}/traefik.yml"
+# Rollback point: advanced by the handler chain ONLY after a successful
+# validation probe (see handlers/main.yml), restored on a failed probe.
+traefik_config_backup_file: "{{ traefik_static_config_file }}.bak"
 traefik_dynamic_config_dir: "{{ traefik_config_dir }}/conf.d"   # File Provider directory
 traefik_log_dir: "/var/log/traefik"
 traefik_data_dir: "/var/lib/traefik"           # acme.json, runtime state
@@ -44,9 +47,21 @@ traefik_extra_capabilities: []                 # e.g. ["CAP_NET_RAW"]
 traefik_extra_unit_vars: {}                    # e.g. {TCPKeepAlive: "yes"}
 
 # Environment passed to the daemon (ACME DNS provider keys like
-# CF_API_TOKEN / ROUTER53_* live here — kept out of the world-readable
-# config file; use ansible-vault for secrets in inventory).
+# CF_API_TOKEN / ROUTER53_* live here). Rendered into a dedicated root-only
+# EnvironmentFile (mode 0600) instead of `Environment=` lines — the unit file
+# itself is world-readable (0644). Use ansible-vault for values in inventory.
 traefik_envs: {}                               # e.g. {CF_API_TOKEN: "{{ vault_cf_token }}"}
+traefik_env_file: "{{ traefik_config_dir }}/traefik.env"   # EnvironmentFile for traefik_envs
+
+# Config validation probe (handlers/main.yml) -------------------------------
+# Traefik v3 has NO offline --check mode: with --configFile the daemon
+# ignores every other flag/env and starts a full server (binds the
+# entrypoints). The handler chain therefore stops the service and runs a
+# timed startup probe: rc 124 (SIGTERM after traefik_validate_timeout) or
+# rc 137 (SIGKILL after a further traefik_validate_kill_after seconds) plus
+# no error lines in the output => config valid, service is started again.
+traefik_validate_timeout: 5                      # seconds the probe must survive
+traefik_validate_kill_after: 10                  # extra grace before SIGKILL
 
 # Logrotate ------------------------------------------------------------------
 traefik_logrotate_enabled: true
@@ -214,8 +229,11 @@ traefik_cert_resolvers: {}
 # `traefik trial --download <name>@<version>` to pre-fetch sources into
 # traefik_plugins_dir, (3) declaring each plugin under `experimental.plugins`
 # so the daemon loads the cached copy on every start.
-# The TRIAL token is a secret: pass it via traefik_envs (ansible-vault), never
-# in the world-visible static config file.
+# The TRIAL token IS rendered into the static config file (templates/
+# traefik.yml.j2, pilot.token): with --configFile the daemon ignores env vars,
+# so traefik_envs would NOT reach it. Protect it with the config file mode
+# (0640, service owner) and keep the value in ansible-vault; the template task
+# sets no_log while a token is defined.
 # ----------------------------------------------------------------------------
 traefik_pilot_enabled: false                   # true -> pilot block + plugins dir + ReadWritePaths
 traefik_pilot_token: ""                        # TRIAL token (pilot.traefik.io); keep it in ansible-vault

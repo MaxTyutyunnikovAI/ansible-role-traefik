@@ -1,7 +1,7 @@
 ---
 # Verify playbook for the default Molecule scenario.
-# Post-converge assertions: binary + pinned version, offline config
-# validation (`traefik --check`), enabled/running service, listening
+# Post-converge assertions: binary + pinned version, validated config backup
+# (proof the handler probe ran), enabled/running service, listening
 # entrypoints, rendered dynamic configs, logrotate file.
 - name: Verify Traefik role outcome
   hosts: all
@@ -28,7 +28,7 @@
         that:
           - >-
             (traefik_version[1:] if traefik_version is match('^v') else traefik_version)
-            in traefik_ver.stdout
+            == ((traefik_ver.stdout | regex_search('Version:\s*(\S+)', '\\1')) | default('', true))
         fail_msg: "Expected {{ traefik_version }}, got: {{ traefik_ver.stdout }}"
 
     - name: Check static configuration file exists
@@ -37,13 +37,13 @@
       register: traefik_cfg
       failed_when: not traefik_cfg.stat.exists
 
-    - name: Validate static configuration offline (traefik --check)
-      ansible.builtin.command:
-        argv:
-          - "{{ traefik_bin_dir }}/traefik"
-          - "--configFile={{ traefik_static_config_file }}"
-          - "--check=true"
-      changed_when: false
+    # A backup exists only when the handler startup probe passed (the chain
+    # refreshes <config>.bak exclusively after a successful validation).
+    - name: Check that a validated configuration backup was produced
+      ansible.builtin.stat:
+        path: "{{ traefik_config_backup_file }}"
+      register: traefik_bak
+      failed_when: not traefik_bak.stat.exists
 
     - name: Gather Traefik service status
       ansible.builtin.systemd:

@@ -1,34 +1,300 @@
 ---
 # ============================================================================
-# Handler chain bound to the listen topic "validate_and_restart_traefik":
-#   1) Run `traefik --configFile=... --check=true` — a dry validation run
-#      (--check alone is parsed as a flag needing an argument in v3).
-#      If it fails, the play aborts and Traefik is NEVER restarted with a
-#      broken config (fail-fast, production-safe).
-#   2) Only when validation succeeded -> restart the service.
-# Handlers within one notification run in declaration order; the `when` guard
-# on step 2 makes the ordering dependency explicit and safe.
+# Handler chain (plan B) — restart gated by a timed startup probe.
+#
+# Why no `--check`: Traefik v3 has NO offline validation mode. `--check` is
+# not a flag at all (v2 relic; v3 aborts with "field not found, node: check"),
+# and once --configFile is given the file loader ignores every other flag and
+# env var — a "validation run" silently starts a FULL server and binds the
+# entrypoint ports (verified empirically with v3.7.14). Validation is therefore
+# a real startup probe against a stopped service:
+#
+#   1. stop the service -> :80/:443 are free for the probe,
+#   2. pre-flight: bind-test every declared entrypoint port — if a FOREIGN
+#      process holds one, the probe would fail with "address already in use"
+#      that (with log.filePath set!) goes only to the log FILE and is invisible
+#      in the probe output — so the conflict is detected BEFORE the probe,
+#   3. pre-create log files as the service user: the probe runs as root and
+#      would otherwise leave root-owned logs the daemon cannot append to,
+#   4. probe `timeout -k <kill_after> <timeout> traefik --configFile=...`:
+#        rc 124 (SIGTERM fired at <timeout>s) or rc 137 (SIGKILL grace
+#        expired) and no error lines in the captured output = the config
+#        loads and the daemon survives >= <timeout>s -> SUCCESS,
+#      any other rc or an error line = broken config -> FAILURE,
+#   5. FAILURE -> restore traefik_config_backup_file and start the PREVIOUS
+#      configuration, then abort the play with the probe output; with no
+#      validated backup the service stays stopped (starting a known-broken
+#      config would only crash-loop it),
+#   6. SUCCESS -> start the service, then refresh the backup so the rollback
+#      point only ever advances to a validated config,
+#   7. port conflict (pre-flight hit or rc=1 + "address already in use" in the
+#      probe output): an ENVIRONMENT problem, not a config one — nothing is
+#      rolled back and the play fails with an explicit recovery hint instead.
+#
+# Start runs BEFORE the backup refresh: if the refresh copy fails, the play
+# still fails loudly while the service keeps running the validated config.
+#
+# Handlers of one notification run in declaration order, so the systemd daemon
+# reload (separate topic, fired on unit changes) is declared FIRST — the unit
+# must be loaded before stop/start act on the service.
+#
+# All side effects (stop/probe/restore/start) are skipped under --check: the
+# probe binds real ports and writes logs/acme.json as root, so it must never
+# run in check mode.
 # ============================================================================
-
-- name: Validate Traefik static configuration before restart
-  ansible.builtin.command:
-    argv:
-      - "{{ traefik_bin_dir }}/traefik"
-      - "--configFile={{ traefik_static_config_file }}"
-      - "--check=true"
-  changed_when: false            # validation is a read-only check, never "changed"
-  check_mode: false              # must really execute even under --check
-  listen: validate_and_restart_traefik
-  register: traefik_config_check
-
-- name: Restart Traefik service after successful validation
-  ansible.builtin.systemd:
-    name: "{{ traefik_service_name }}"
-    state: restarted
-  listen: validate_and_restart_traefik
-  when: traefik_config_check.rc == 0
 
 - name: Reload systemd daemon for Traefik
   ansible.builtin.systemd:
     daemon_reload: true
   listen: Reload systemd daemon for Traefik
+
+- name: Check whether the Traefik unit file is deployed
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/{{ traefik_service_name }}.service"
+  register: traefik_unit_stat
+  changed_when: false
+  listen: validate_and_restart_traefik
+
+- name: Stop Traefik service to free the entrypoint ports for the probe
+  ansible.builtin.systemd:
+    name: "{{ traefik_service_name }}"
+    state: stopped
+  listen: validate_and_restart_traefik
+  when:
+    - not ansible_check_mode
+    - traefik_unit_stat.stat.exists | bool
+
+# `state: file` REFUSES to create an absent path ("absent, cannot continue"),
+# while plain `state: touch` bumps mtime on every run. touch + *_time: preserve
+# is the idempotent combination: creates when missing, fixes owner/mode when
+# present, reports no change otherwise.
+- name: Pre-create log files with service ownership for the root probe
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: touch
+    modification_time: preserve
+    access_time: preserve
+    owner: "{{ traefik_system_user }}"
+    group: "{{ traefik_system_group }}"
+    mode: "0640"
+  loop:
+    - "{{ (traefik_static_config.log | default({})).filePath | default(traefik_log_dir ~ '/traefik.log') }}"
+    - "{{ (traefik_static_config.accessLog | default({})).filePath | default(traefik_log_dir ~ '/access.log') }}"
+  loop_control:
+    label: "{{ item }}"
+  listen: validate_and_restart_traefik
+  when: not ansible_check_mode
+
+# Bind-test of every declared entrypoint port (mirrors Traefik's own bind:
+# SO_REUSEADDR matches Go's net.Listen, so TIME_WAIT leftovers after our own
+# stop do NOT count as a conflict). rc=1 => a foreign process holds a port.
+# This must run BEFORE the probe: with log.filePath set the daemon logs
+# "address already in use" only into the log file, so the probe output would
+# be empty and the conflict would be misclassified as a broken config.
+- name: Check that entrypoint ports are free after stopping the service
+  ansible.builtin.command:
+    argv: "{{ [ansible_python.executable | default('python3'), '-c', _port_check_script]
+              + (_traefik_probe_ports | list) }}"
+  vars:
+    _port_check_script: |
+      import socket, sys
+      busy = []
+      for p in sys.argv[1:]:
+          try:
+              port = int(p)
+          except ValueError:
+              continue
+          s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+          try:
+              s.bind(("0.0.0.0", port))
+          except OSError as e:
+              busy.append("%s (%s)" % (p, e))
+          finally:
+              s.close()
+      if busy:
+          print("busy ports held by a foreign process: " + "; ".join(busy))
+          sys.exit(1)
+    _traefik_probe_ports: >-
+      {{ (traefik_static_config.entryPoints | default({}))
+         | dict2items | map(attribute='value.address', default='')
+         | map('regex_replace', '^.*:(\d+)$', '\1')
+         | select('match', '^\d+$') | list }}
+  register: traefik_ports_check
+  changed_when: false
+  failed_when: false
+  listen: validate_and_restart_traefik
+  when: not ansible_check_mode
+
+# The probe IS the validation: rc 124/137 means the daemon was still alive
+# when timeout fired (config parsed, entrypoints bound, no fatal error).
+# failed_when/changed_when are suppressed because "timed out" is the SUCCESS
+# case here — the outcome is decided by the evaluate task below.
+- name: Probe the new static configuration with a timed Traefik startup
+  ansible.builtin.command:
+    argv:
+      - timeout
+      - "-k"
+      - "{{ traefik_validate_kill_after }}"
+      - "{{ traefik_validate_timeout }}"
+      - "{{ traefik_bin_dir }}/traefik"
+      - "--configFile={{ traefik_static_config_file }}"
+  register: traefik_config_probe
+  changed_when: false
+  failed_when: false
+  listen: validate_and_restart_traefik
+  when:
+    - not ansible_check_mode
+    # busy ports => conflict path, the probe is pointless (it would only
+    # reproduce the bind error) — and its output would be empty anyway.
+    - (traefik_ports_check.rc | default(0) | int) != 1
+
+# Error markers on the captured output: JSON logger ("level":"error"/"fatal")
+# and the zerolog console writer (ERR[...]/FTL[...]). Runtime errors that go
+# only to the log FILE are not visible here — they cannot prevent the bind and
+# will show up in the service log after the restart.
+- name: Evaluate the configuration probe result
+  ansible.builtin.set_fact:
+    traefik_probe_ok: >-
+      {{ (traefik_config_probe is not skipped)
+         and (traefik_config_probe.rc | int) in [124, 137]
+         and '"level":"error"' not in _traefik_probe_out
+         and '"level":"fatal"' not in _traefik_probe_out
+         and 'ERR[' not in _traefik_probe_out
+         and 'FTL[' not in _traefik_probe_out }}
+    traefik_probe_env_conflict: >-
+      {{ (traefik_ports_check.rc | default(0) | int) == 1
+         or ((traefik_config_probe.rc | default(-1) | int) == 1
+             and 'address already in use' in _traefik_probe_out) }}
+  vars:
+    _traefik_probe_out: >-
+      {{ (traefik_config_probe.stdout | default(''))
+         ~ (traefik_config_probe.stderr | default('')) }}
+  listen: validate_and_restart_traefik
+  when: not ansible_check_mode
+
+- name: Stat acme.json after the root probe (ownership may need fixing)
+  ansible.builtin.stat:
+    path: "{{ traefik_data_dir }}/acme.json"
+  register: traefik_acme_stat
+  changed_when: false
+  listen: validate_and_restart_traefik
+  when: not ansible_check_mode
+
+# The probe runs as root: if it created/touched acme.json the file would stay
+# root-owned and the service user could not renew certificates afterwards.
+- name: Re-own acme.json to the service user after the root probe
+  ansible.builtin.file:
+    path: "{{ traefik_data_dir }}/acme.json"
+    state: file
+    owner: "{{ traefik_system_user }}"
+    group: "{{ traefik_system_group }}"
+    mode: "0600"
+  listen: validate_and_restart_traefik
+  when:
+    - not ansible_check_mode
+    - traefik_acme_stat.stat.exists | default(false)
+    - >-
+      (traefik_acme_stat.stat.pw_name | default('')) != traefik_system_user
+      or (traefik_acme_stat.stat.mode | default('')) != '0600'
+
+- name: Stat the validated configuration backup
+  ansible.builtin.stat:
+    path: "{{ traefik_config_backup_file }}"
+  register: traefik_backup_stat
+  changed_when: false
+  listen: validate_and_restart_traefik
+  when: not ansible_check_mode
+
+# FAILURE path: roll back BEFORE the start below so the service comes up with
+# the previous known-good configuration instead of the broken one.
+- name: Restore the previous static configuration after a failed probe
+  ansible.builtin.copy:
+    src: "{{ traefik_config_backup_file }}"
+    dest: "{{ traefik_static_config_file }}"
+    remote_src: true
+    owner: "{{ traefik_config_owner }}"
+    group: "{{ traefik_config_group }}"
+    mode: "{{ traefik_config_mode }}"
+  listen: validate_and_restart_traefik
+  when:
+    - not ansible_check_mode
+    - not (traefik_probe_ok | default(false) | bool)
+    - not (traefik_probe_env_conflict | default(false) | bool)
+    - traefik_backup_stat.stat.exists | default(false)
+
+- name: Start Traefik service after a successful configuration probe
+  ansible.builtin.systemd:
+    name: "{{ traefik_service_name }}"
+    state: started
+  listen: validate_and_restart_traefik
+  when:
+    - not ansible_check_mode
+    - traefik_unit_stat.stat.exists | bool
+    - not (traefik_probe_env_conflict | default(false) | bool)
+    - >-
+      (traefik_probe_ok | default(false) | bool)
+      or (traefik_backup_stat.stat.exists | default(false) | bool)
+
+# SUCCESS path: advance the rollback point only after the service is back up
+# (if this copy fails the play errors out, but the validated config keeps
+# running).
+- name: Save the validated static configuration as the rollback backup
+  ansible.builtin.copy:
+    src: "{{ traefik_static_config_file }}"
+    dest: "{{ traefik_config_backup_file }}"
+    remote_src: true
+    owner: "{{ traefik_config_owner }}"
+    group: "{{ traefik_config_group }}"
+    mode: "{{ traefik_config_mode }}"
+  listen: validate_and_restart_traefik
+  when:
+    - not ansible_check_mode
+    - traefik_probe_ok | default(false) | bool
+
+- name: Fail when the probe could not bind the entrypoint ports
+  ansible.builtin.fail:
+    msg: |-
+      Traefik could not bind the entrypoint ports — they are held by ANOTHER
+      process. The configuration was NOT rolled back (it may be valid) and the
+      service was NOT started — it stays STOPPED until the conflict is resolved.
+      --- port check ---
+      {{ traefik_ports_check.stdout | default('') ~ traefik_ports_check.stderr | default('') }}
+      --- probe output (if any) ---
+      {{ '' if (traefik_config_probe is skipped)
+         else ((traefik_config_probe.stdout | default('')
+                ~ traefik_config_probe.stderr | default(''))) }}
+      --- recovery ---
+      Free the ports above (e.g. `ss -lntp | grep <port>`), then re-run the
+      playbook or `systemctl start {{ traefik_service_name }}`.
+  listen: validate_and_restart_traefik
+  when:
+    - not ansible_check_mode
+    - traefik_probe_env_conflict | default(false) | bool
+
+- name: Fail when the new static configuration did not pass the probe
+  ansible.builtin.fail:
+    msg: |-
+      Traefik static configuration FAILED the startup probe
+      (rc={{ traefik_config_probe.rc | default('n/a') }}).
+      --- probe output ---
+      {{ (traefik_config_probe.stdout | default(''))
+         ~ (traefik_config_probe.stderr | default('')) }}
+      --- recovery ---
+      {{ _traefik_recovery }}
+  vars:
+    _traefik_recovery: >-
+      {{ 'The validated backup was restored to ' ~ traefik_static_config_file
+         ~ ' and the service was started with the PREVIOUS configuration.'
+         ~ ' Fix the new configuration and re-run the playbook.'
+         if (traefik_backup_stat.stat.exists | default(false) | bool)
+         else 'No validated backup (' ~ traefik_config_backup_file
+              ~ ') exists — the service was NOT started (a broken config would'
+              ~ ' only crash-loop it). Fix the configuration at '
+              ~ traefik_static_config_file
+              ~ ' — runtime errors may also be in the log file — and re-run the playbook.' }}
+  listen: validate_and_restart_traefik
+  when:
+    - not ansible_check_mode
+    - not (traefik_probe_ok | default(false) | bool)
+    - not (traefik_probe_env_conflict | default(false) | bool)

@@ -3,7 +3,8 @@
 # Configure: declarative static config (dict -> to_nice_yaml) + File Provider
 # dynamic configs rendered via a loop over traefik_dynamic_configs.
 # Every config change notifies the validated-restart handler chain — the
-# service is restarted ONLY if `traefik --check` passes (see handlers).
+# service is restarted ONLY after a timed startup probe of the new config
+# passes (see handlers/main.yml; Traefik v3 has no offline --check).
 # ============================================================================
 
 - name: Generate static Traefik configuration from traefik_static_config dict
@@ -13,10 +14,42 @@
     owner: "{{ traefik_config_owner }}"
     group: "{{ traefik_config_group }}"
     mode: "{{ traefik_config_mode }}"
-    # No inline `validate:` here: `traefik --check` binds entrypoint sockets,
-    # which would make temp-file validation hang/conflict with the running
-    # instance. The final file is validated in the handler chain (below the
-    # notify) before any restart — that is the authoritative gate.
+    # No inline `validate:` here: there is no offline validator (v3 `--check`
+    # does not exist and a probe run would bind the entrypoint sockets of a
+    # temp file). The authoritative gate is the handler chain (see the notify
+    # below): it stops the service, probes the final file with a timed
+    # startup and rolls back to <config>.bak if the probe fails.
+  # The rendered config can contain the pilot TRIAL token — censor the task.
+  no_log: "{{ traefik_pilot_token | length > 0 }}"
+  notify: validate_and_restart_traefik
+
+# --- Environment file with secrets (systemd EnvironmentFile) ----------------
+# traefik_envs is rendered into a root-only 0600 file instead of `Environment=`
+# lines in the unit: the unit must stay world-readable (0644) for inspection,
+# while ACME DNS tokens etc. must not be visible there. systemd (pid1, root)
+# reads EnvironmentFile before dropping privileges, so 0600 root:root works.
+# no_log censors the secret values from the task output.
+- name: Deploy Traefik environment file with secrets (root-only)
+  ansible.builtin.copy:
+    content: |
+      {% for item in traefik_envs | dict2items -%}
+      {{ item.key }}={{ item.value }}
+      {% endfor -%}
+    dest: "{{ traefik_env_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: traefik_envs | length > 0
+  no_log: true
+  notify: validate_and_restart_traefik
+
+# `file: state=absent` is natively idempotent (no change when already absent),
+# so a plain notify only fires on a real removal — no extra changed_when hacks.
+- name: Remove Traefik environment file when no secrets are defined
+  ansible.builtin.file:
+    path: "{{ traefik_env_file }}"
+    state: absent
+  when: traefik_envs | length == 0
   notify: validate_and_restart_traefik
 
 # --- Traefik v3 plugins (trial mechanism) -------------------------------------
@@ -82,22 +115,14 @@
   notify: validate_and_restart_traefik
 
 # Cleanup symmetric to the "Remove default middlewares file..." task below:
-# when the option is unset the generated file must disappear, but a no-op
-# (file already absent) must not report "changed" — otherwise idempotence of
-# every plain run would break and the restart handler would fire needlessly.
-- name: Check whether the template-based dynamic config file exists
-  ansible.builtin.stat:
-    path: "{{ traefik_dynamic_config_dir }}/{{ traefik_dynamic_configs_template_name }}{{ traefik_dynamic_configs_file_extension }}"
-  register: dyn_template_stat
-  when: traefik_dynamic_configs_template | length == 0
-
+# when the option is unset the generated file must disappear. `file:
+# state=absent` reports no change for an already-absent file, so the plain
+# notify below only fires on a real removal — idempotence stays intact.
 - name: Remove template-based dynamic config when the option is unset
   ansible.builtin.file:
     path: "{{ traefik_dynamic_config_dir }}/{{ traefik_dynamic_configs_template_name }}{{ traefik_dynamic_configs_file_extension }}"
     state: absent
-  when:
-    - traefik_dynamic_configs_template | length == 0
-    - dyn_template_stat.stat.exists | default(false)
+  when: traefik_dynamic_configs_template | length == 0
   notify: validate_and_restart_traefik
 
 - name: Render default middlewares file (security headers, https redirect)
@@ -139,26 +164,20 @@
     path: "{{ traefik_dynamic_config_dir }}/05-dashboard.yml"
     state: absent
   when: not (traefik_dashboard_enabled | bool)
-  changed_when: dash_file_result.stat.exists | default(false)
-  register: dash_file_result
   notify: validate_and_restart_traefik
 
+# `file: state=absent` is natively idempotent: it reports no change when the
+# file is already gone, so the notify fires only on a real removal.
 - name: Remove default middlewares file when the option is disabled
   ansible.builtin.file:
     path: "{{ traefik_dynamic_config_dir }}/00-default-middlewares.yml"
     state: absent
   when: not (traefik_default_middlewares_enabled | bool)
-  # `file: state=absent` reports "changed" on every run for missing files,
-  # which would break idempotence; only a real removal (existed before) is a
-  # change worth notifying.
-  changed_when: file_result.stat.exists | default(false)
-  register: file_result
   notify: validate_and_restart_traefik
 
 # NOTE ON DYNAMIC CONFIG VALIDATION (verified empirically with Traefik v3):
-# `traefik --configFile=<file> --check` validates ONLY static configuration and
-# binds entrypoint sockets while checking. File Provider dynamic resources are
-# loaded at runtime (providers.file.watch=true applies them without a restart),
-# and TLS options are resolved only during an actual handshake — so there is no
-# safe offline schema-validation for them. The authoritative gate before any
-# restart is the static-config validation performed in the handler chain.
+# dynamic File Provider resources are loaded at runtime (providers.file.watch
+# applies them without a restart), and TLS options are resolved only during an
+# actual handshake — there is no safe offline schema-validation for them.
+# The authoritative gate before any restart is the static-config startup probe
+# performed in the handler chain (see handlers/main.yml).

@@ -21,11 +21,12 @@ User={{ traefik_system_user }}
 Group={{ traefik_system_group }}
 
 WorkingDirectory={{ traefik_data_dir }}
-# Environment for the daemon (ACME DNS provider tokens etc.) — injected via
-# systemd instead of the config file so secrets never touch /etc/traefik.
-{% for key, value in traefik_envs | dict2items %}
-Environment="{{ key }}={{ value }}"
-{% endfor %}
+{% if traefik_envs | length > 0 %}
+# Secrets (ACME DNS provider tokens etc.) live in a root-only 0600 file —
+# `Environment=` lines would be world-readable here (unit mode 0644).
+# systemd reads EnvironmentFile itself before dropping privileges.
+EnvironmentFile=-{{ traefik_env_file }}
+{% endif %}
 ExecStart={{ traefik_bin_dir }}/traefik \
   --configFile={{ traefik_static_config_file }}
 
@@ -66,8 +67,10 @@ ReadWritePaths={{ traefik_plugins_dir }}
 {% endif %}
 
 # Free-form extra [Service] keys from traefik_extra_unit_vars (dict -> "Key=Value").
-{% for key, value in traefik_extra_unit_vars | dict2items %}
-{{ key }}={{ value }}
+# NB: unpacking `for key, value in dict2items` yields the LITERAL strings
+# 'key'/'value' (a dict iterates its own keys) — hence item.key/item.value.
+{% for item in traefik_extra_unit_vars | dict2items %}
+{{ item.key }}={{ item.value }}
 {% endfor %}
 
 # RuntimeDirectory makes systemd create /run/<service> (owned by the service

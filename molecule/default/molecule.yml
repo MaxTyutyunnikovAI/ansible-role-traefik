@@ -41,11 +41,16 @@ provisioner:
   inventory:
     group_vars:
       traefik_servers:
-        traefik_version: v3.6.2
+        traefik_version: v3.7.14
         traefik_static_config:
           entryPoints:
             web:
               address: ":80"
+              http:
+                redirections:
+                  entryPoint:
+                    to: websecure
+                    scheme: https
             websecure:
               address: ":443"
           log:
@@ -73,6 +78,7 @@ scenario:
     - prepare
     - converge
     - idempotence
-    - side_effect
+    # 'side_effect' removed from the sequence: the scenario has no
+    # side_effect.yml and its absence produced "Missing playbook" warnings.
     - verify
     - destroy

@@ -11,8 +11,9 @@ Ansible-роль для установки Traefik v3 в качестве system
 * Декларативная статическая конфигурация (`traefik_static_config` → YAML через `to_nice_yaml`).
 * Динамическая конфигурация через File Provider (`traefik_dynamic_configs` → отдельные файлы в `conf.d/` с `watch: true`).
 * Закалённый (hardened) systemd-юнит: `NoNewPrivileges`, `ProtectSystem`, `PrivateTmp`, `CAP_NET_BIND_SERVICE` и т.д.
-* Перезапуск сервиса **только после** успешной валидации `traefik --check` (обработчик-цепочка `validate_and_restart_traefik`) — «битая» конфигурация никогда не поднимет сервис.
-* Настройка logrotate с пересылкой `SIGUSR1` процессу Traefik (переоткрытие логов без простоя).
+* Перезапуск сервиса **только после** успешной проверки новой конфигурации тайм-аутным пробным запуском (обработчик-цепочка `validate_and_restart_traefik`): конфигурация парсится, демоны переживают >= N секунд и не пишут ошибок → старт; иначе — откат на `traefik.yml.bak` и прерывание плейбока. «битая» конфигурация никогда не поднимет сервис (у Traefik v3 нет офлайн-режима `--check`, см. `THINKING.md`).
+* Секреты (`traefik_envs`, например `CF_API_TOKEN`) вынесены в root-файл `traefik.env` (mode `0600`) и подключаются через `EnvironmentFile` — в world-readable юнит (0644) они не попадают.
+* Ротация logrotate с пересылкой `SIGUSR1` процессу Traefik (переоткрытие логов без простоя).
 * Поддержка SELinux (восстановление контекста бинарника) и разных архитектур (amd64/arm64/386).
 
 Требования
@@ -29,7 +30,7 @@ Ansible-роль для установки Traefik v3 в качестве system
 
 ```yaml
 # Версия и загрузка
-traefik_version: "v3.6.2"                                   # закреплённый тег релиза v3.x
+traefik_version: "v3.7.14"                                  # закреплённый тег релиза v3.x
 traefik_repo_url: "https://github.com/traefik/traefik"
 traefik_binary_url: ".../traefik_{{ traefik_version }}_linux_{{ go_arch }}.tar.gz"
 
@@ -40,6 +41,7 @@ traefik_system_group: "traefik"
 traefik_bin_dir: "/usr/local/bin"
 traefik_config_dir: "/etc/traefik"
 traefik_static_config_file: "{{ traefik_config_dir }}/traefik.yml"
+traefik_config_backup_file: "{{ traefik_static_config_file }}.bak"  # откат при провале пробы
 traefik_dynamic_config_dir: "{{ traefik_config_dir }}/conf.d"   # каталог File Provider
 traefik_log_dir: "/var/log/traefik"
 traefik_data_dir: "/var/lib/traefik"                            # acme.json, runtime state
@@ -47,6 +49,14 @@ traefik_data_dir: "/var/lib/traefik"                            # acme.json, run
 # Права владельцев и режимы
 traefik_config_mode: "0640"
 traefik_directory_mode: "0750"
+
+# Секреты демона (ACME DNS-токены и т.п.) — root-файл 0600 + EnvironmentFile
+traefik_envs: {}              # например {CF_API_TOKEN: "{{ vault_cf_token }}"}
+traefik_env_file: "{{ traefik_config_dir }}/traefik.env"
+
+# Параметры пробной валидации конфигурации (см. handlers/main.yml)
+traefik_validate_timeout: 5        # секунд, которые пробный запуск должен пережить
+traefik_validate_kill_after: 10    # доп. отсрочка до SIGKILL
 
 # Параметры systemd-юнита
 traefik_start_timeout: 30
@@ -155,7 +165,7 @@ traefik_generated_routers:
   become: true
   roles:
     - role: w0.traefik
-      traefik_version: v3.6.2
+      traefik_version: v3.7.14
 ```
 
 Готовые примеры подключения провайдеров (Docker, Kubernetes/k3s) и установки
@@ -167,7 +177,7 @@ traefik_generated_routers:
 Тестирование
 ------------
 
-Роль содержит Molecule-сценарий (`molecule/default`) с docker-драйвером на базе RockyLinux 9: проверка синтаксиса, converge, идемпотентность, check-режим и verify.
+Роль содержит Molecule-сценарий (`molecule/default`) с docker-драйвером на базе RockyLinux 9: проверка синтаксиса, converge, идемпотентность и verify (версия бинарника, откатный бэкап конфигурации, работающие entry points, редирект HTTP→HTTPS, TLS, закалка юнита).
 
 ```bash
 molecule test

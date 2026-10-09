@@ -36,6 +36,9 @@
     owner: "{{ item.owner | default(traefik_system_user) }}"
     group: "{{ item.group | default(traefik_system_group) }}"
     mode: "{{ item.mode | default(traefik_directory_mode) }}"
+    # The plugins dir is pilot-only — its own task below carries the
+    # `when: traefik_pilot_enabled` guard (a `when` key inside a loop item
+    # is silently ignored by Ansible).
   loop:
     - path: "{{ traefik_bin_dir }}"
       owner: root
@@ -49,12 +52,19 @@
       group: "{{ traefik_config_group }}"
     - path: "{{ traefik_log_dir }}"
     - path: "{{ traefik_data_dir }}"
-    # Plugin cache dir (traefik trial downloads Yaegi sources here at startup);
-    # owned by the service user because the daemon must be able to write it.
-    - path: "{{ traefik_plugins_dir }}"
-      when: traefik_pilot_enabled | bool
   loop_control:
     label: "{{ item.path }}"
+
+# Plugin cache dir (traefik trial downloads Yaegi sources here at startup);
+# owned by the service user because the daemon must be able to write it.
+- name: Ensure the Traefik plugin cache directory exists (pilot only)
+  ansible.builtin.file:
+    path: "{{ traefik_plugins_dir }}"
+    state: directory
+    owner: "{{ traefik_config_owner }}"
+    group: "{{ traefik_config_group }}"
+    mode: "{{ traefik_directory_mode }}"
+  when: traefik_pilot_enabled | bool
 
 - name: Check whether the Traefik binary is already present
   ansible.builtin.stat:
@@ -75,14 +85,19 @@
   when: traefik_binary_stat.stat.exists | bool
 
 # needs_install is True on first run or when the pinned version has changed.
-# NOTE: `traefik version` prints "Version:  3.6.2" WITHOUT the leading "v"
-# of the git tag, so we compare against the tag with the "v" stripped.
+# `traefik version` prints "Version:  3.6.2" WITHOUT the leading "v" of the
+# git tag, so the tag is stripped and the version is extracted with an exact
+# regex — a plain substring check would treat 3.7.1 as satisfied by 3.7.14.
 - name: Determine if Traefik binary must be (re)installed
   ansible.builtin.set_fact:
     traefik_needs_install: >-
       {{ not (traefik_binary_stat.stat.exists | bool)
-         or (traefik_version[1:] if traefik_version is match('^v') else traefik_version)
-            not in (traefik_installed_version.stdout | default('')) }}
+         or ((traefik_installed_version.stdout | default('')
+              | regex_search('Version:\s*(\S+)', '\\1') | default('', true))
+             != (_traefik_want_version)) }}
+  vars:
+    _traefik_want_version: >-
+      {{ traefik_version[1:] if traefik_version is match('^v') else traefik_version }}
 
 - name: Download and unpack Traefik release tarball from GitHub
   when: traefik_needs_install | bool
@@ -115,8 +130,10 @@
         group: root
         mode: "0755"
         remote_src: true
-      # A binary upgrade by itself does NOT restart the proxy; any restart is
-      # always routed through the validate_and_restart_traefik handler chain.
+      # A new binary must actually replace the running daemon, so the copy
+      # notifies the validated-restart chain — the restart still only happens
+      # after the startup probe of the current config passes (handlers).
+      notify: validate_and_restart_traefik
 
     - name: Remove temporary download directory
       ansible.builtin.file:
