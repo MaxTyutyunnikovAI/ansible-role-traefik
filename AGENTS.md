@@ -13,7 +13,7 @@
 ```
 defaults/main.yml   # все настраиваемые переменные (единственный источник правды по default-значениям)
 vars/main.yml       # внутренние переменные (карта архитектур go_arch_map)
-tasks/              # main.yml последовательно включает install → configure → systemd → logrotate
+tasks/              # main.yml последовательно включает install → kubernetes (opt) → configure → systemd → logrotate
 handlers/main.yml   # цепочка validate_and_restart_traefik + reload systemd
 templates/          # traefik.yml.j2, traefik.service.j2, traefik-logrotate.j2
 meta/main.yml       # метаданные Galaxy

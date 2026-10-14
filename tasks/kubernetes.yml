@@ -1,0 +1,370 @@
+---
+# Kubernetes RBAC / TLSStore bootstrap.
+# Creates SA → ClusterRole → Binding → token Secret → fetches token + CA.
+# Optionally creates a TLSStore CRD for cert-manager default certificate.
+# All tasks run on the managed host (default); run_once applies to
+# cluster-wide singleton resources.
+# ============================================================================
+
+- name: Assert kubeconfig exists for k8s module access
+  ansible.builtin.stat:
+    path: "{{ traefik_k8s_kubeconfig }}"
+  register: _k8s_kubeconfig_stat
+  failed_when: not _k8s_kubeconfig_stat.stat.exists
+  changed_when: false
+  run_once: true
+
+- name: Ensure kubernetes python client is reachable
+  ansible.builtin.command: python3 -c "from kubernetes import client, config; import kubernetes.client"
+  register: _k8s_py_check
+  changed_when: false
+  failed_when: _k8s_py_check.rc != 0
+  run_once: true
+
+# ---------------------------------------------------------------------------
+# Namespace
+# ---------------------------------------------------------------------------
+- name: Create RBAC namespace in the cluster
+  kubernetes.core.k8s:
+    kubeconfig: "{{ traefik_k8s_kubeconfig }}"
+    name: "{{ traefik_kubernetes_rbac_namespace }}"
+    kind: Namespace
+    state: present
+  run_once: true
+  when: traefik_kubernetes_rbac_create_namespace | bool
+
+# ---------------------------------------------------------------------------
+# ServiceAccount
+# ---------------------------------------------------------------------------
+- name: Create ServiceAccount for external Traefik client
+  kubernetes.core.k8s:
+    kubeconfig: "{{ traefik_k8s_kubeconfig }}"
+    name: "{{ traefik_kubernetes_rbac_sa_name }}"
+    namespace: "{{ traefik_kubernetes_rbac_namespace }}"
+    kind: ServiceAccount
+    state: present
+  run_once: true
+
+# ---------------------------------------------------------------------------
+# ClusterRole (least-privilege default rules + extras)
+# ---------------------------------------------------------------------------
+- name: Define default cluster role rules
+  ansible.builtin.set_fact:
+    _traefik_rbac_default_rules: >-
+      {{ _traefik_rbac_base
+         + traefik_k8s_cluster_role_rules
+         + traefik_k8s_rbac_extra_rules }}
+  vars:
+    _traefik_rbac_base:
+      # Ingress / IngressClass (kubernetesIngress)
+      - apiGroups: ["networking.k8s.io"]
+        resources: ["ingresses", "ingressclasses"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["networking.k8s.io"]
+        resources: ["ingresses/status"]
+        verbs: ["get", "list", "watch", "update"]
+      # Services, Endpoints, Namespaces, Secrets (k8s provider lookups)
+      - apiGroups: [""]
+        resources: ["services", "endpoints", "namespaces", "secrets"]
+        verbs: ["get", "list", "watch"]
+      # Traefik CRD (traefik.io)
+      - apiGroups: ["traefik.io"]
+        resources:
+          - "ingressroutes"
+          - "ingressroutetcps"
+          - "ingressrouteudps"
+          - "middlewares"
+          - "tlsoptions"
+          - "tlsstores"
+          - "traefikservices"
+          - "serverstransports"
+        verbs: ["get", "list", "watch"]
+      # Traefik CRD (legacy traefik.containo.us)
+      - apiGroups: ["traefik.containo.us"]
+        resources:
+          - "ingressroutes"
+          - "ingressroutetcps"
+          - "middlewares"
+          - "tlsoptions"
+          - "tlsstores"
+          - "traefikservices"
+          - "serverstransports"
+        verbs: ["get", "list", "watch"]
+      # Gateway API (kubernetesGateway provider)
+      - apiGroups: ["gateway.networking.k8s.io"]
+        resources:
+          - "gatewayclasses"
+          - "gateways"
+          - "httproutes"
+          - "tcproutes"
+          - "udproutes"
+          - "tlsroutes"
+          - "referencegrants"
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["gateway.networking.k8s.io"]
+        resources:
+          - "gateways/status"
+          - "httproutes/status"
+          - "tcproutes/status"
+          - "tlsroutes/status"
+          - "udproutes/status"
+        verbs: ["get", "list", "watch", "update"]
+
+- name: Create ClusterRole with least-privilege read rules
+  kubernetes.core.k8s:
+    kubeconfig: "{{ traefik_k8s_kubeconfig }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: "{{ traefik_kubernetes_rbac_cluster_role_name }}"
+      spec:
+        rules: "{{ _traefik_rbac_default_rules }}"
+    state: present
+  run_once: true
+
+# ---------------------------------------------------------------------------
+# ClusterRoleBinding
+# ---------------------------------------------------------------------------
+- name: Bind the ClusterRole to the ServiceAccount
+  kubernetes.core.k8s:
+    kubeconfig: "{{ traefik_k8s_kubeconfig }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: "{{ traefik_kubernetes_rbac_binding_name }}"
+      spec:
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: "{{ traefik_kubernetes_rbac_cluster_role_name }}"
+        subjects:
+          - apiGroup: ""
+            kind: ServiceAccount
+            name: "{{ traefik_kubernetes_rbac_sa_name }}"
+            namespace: "{{ traefik_kubernetes_rbac_namespace }}"
+    state: present
+  run_once: true
+
+# ---------------------------------------------------------------------------
+# Token Secret
+# ---------------------------------------------------------------------------
+- name: Create service-account-token Secret
+  kubernetes.core.k8s:
+    kubeconfig: "{{ traefik_k8s_kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ traefik_kubernetes_rbac_token_secret_name }}"
+        namespace: "{{ traefik_kubernetes_rbac_namespace }}"
+        annotations:
+          kubernetes.io/service-account.name: "{{ traefik_kubernetes_rbac_sa_name }}"
+      type: kubernetes.io/service-account-token
+    state: present
+  run_once: true
+
+- name: Fetch token from Secret (retry until populated by token controller)
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ traefik_k8s_kubeconfig }}"
+    kind: Secret
+    name: "{{ traefik_kubernetes_rbac_token_secret_name }}"
+    namespace: "{{ traefik_kubernetes_rbac_namespace }}"
+  register: _token_secret
+  retries: 12
+  delay: 5
+  until:
+    - _token_secret.resources | length > 0
+    - _token_secret.resources[0].data is defined
+    - _token_secret.resources[0].data.token is defined
+    - _token_secret.resources[0].data.token | length > 0
+  changed_when: false
+  no_log: true
+  run_once: true
+
+- name: Store token as a fact for cross-host broadcasting
+  ansible.builtin.set_fact:
+    _traefik_k8s_token: "{{ _token_secret.resources[0].data.token }}"
+  no_log: true
+  run_once: true
+
+- name: Broadcast token value to all hosts in the batch
+  ansible.builtin.set_fact:
+    _traefik_k8s_token: "{{ hostvars[_run_once_host]._traefik_k8s_token }}"
+  vars:
+    _run_once_host: "{{ ansible_play_hosts_all[0] }}"
+  when: _traefik_k8s_token is not defined
+
+- name: Write kubernetes token file (path-based, Traefik v3.7+)
+  ansible.builtin.copy:
+    content: "{{ _traefik_k8s_token }}\n"
+    dest: "{{ traefik_k8s_token_file }}"
+    owner: "{{ traefik_config_owner }}"
+    group: "{{ traefik_config_group }}"
+    mode: "0640"
+  no_log: true
+  notify: validate_and_restart_traefik
+
+# ---------------------------------------------------------------------------
+# Cluster CA (from kubeconfig or fallback ConfigMap)
+# ---------------------------------------------------------------------------
+- name: Read kubeconfig for the cluster CA
+  ansible.builtin.slurp:
+    src: "{{ traefik_k8s_kubeconfig }}"
+  register: _kubeconfig_raw
+  changed_when: false
+
+- name: Compute CA content and store as a fact
+  ansible.builtin.set_fact:
+    _traefik_k8s_ca: "{{ _cluster_ca }}"
+  vars:
+    _kc: "{{ _kubeconfig_raw.content | b64decode | from_yaml }}"
+    _ca_data_b64: "{{ _kc.get('certificate-authority-data', '') }}"
+    _ca_path: "{{ _kc.get('certificate-authority', '') }}"
+    _ca_file_content: "{{ lookup('file', _ca_path) if _ca_path | length > 0 else '' }}"
+    _cluster_ca: "{{ (_ca_data_b64 | b64decode) if _ca_data_b64 | length > 0 else (_ca_file_content if _ca_file_content | length > 0 else '') }}"
+
+- name: Broadcast CA content to all hosts in the batch
+  ansible.builtin.set_fact:
+    _traefik_k8s_ca: "{{ hostvars[_run_once_host]._traefik_k8s_ca }}"
+  vars:
+    _run_once_host: "{{ ansible_play_hosts_all[0] }}"
+  when: _traefik_k8s_ca is not defined
+
+- name: Write cluster CA file
+  ansible.builtin.copy:
+    content: "{{ _traefik_k8s_ca }}"
+    dest: "{{ traefik_k8s_ca_file }}"
+    owner: "{{ traefik_config_owner }}"
+    group: "{{ traefik_config_group }}"
+    mode: "0640"
+  register: _ca_write
+
+- name: Stat CA file to know if fallback is needed (empty or absent)
+  ansible.builtin.stat:
+    path: "{{ traefik_k8s_ca_file }}"
+  register: _stat_ca
+  changed_when: false
+
+- name: Fetch cluster root CA from kube-root-ca.crt ConfigMap (fallback)
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ traefik_k8s_kubeconfig }}"
+    kind: ConfigMap
+    name: kube-root-ca.crt
+    namespace: "{{ traefik_kubernetes_rbac_namespace }}"
+  register: _root_ca_cm
+  changed_when: false
+  when:
+    - _stat_ca.stat.exists is defined
+    - (not _stat_ca.stat.exists) or (_stat_ca.stat.size is defined and _stat_ca.stat.size == 0)
+
+- name: Write cluster root CA from ConfigMap (fallback)
+  ansible.builtin.copy:
+    content: "{{ _root_ca_cm.resources[0].data['ca.crt'] | default('') }}"
+    dest: "{{ traefik_k8s_ca_file }}"
+    owner: "{{ traefik_config_owner }}"
+    group: "{{ traefik_config_group }}"
+    mode: "0640"
+  when:
+    - _root_ca_cm is defined
+    - _root_ca_cm.resources | length > 0
+    - _root_ca_cm.resources[0].data is defined
+    - _root_ca_cm.resources[0].data['ca.crt'] is defined
+
+# ---------------------------------------------------------------------------
+# Pass token and CA to the Traefik role variables
+# ---------------------------------------------------------------------------
+- name: Set traefik kubernetes connection facts (path-based token)
+  ansible.builtin.set_fact:
+    traefik_kubernetes_token: "{{ traefik_k8s_token_file }}"
+    traefik_kubernetes_cert_auth_file: "{{ traefik_k8s_ca_file }}"
+  when: traefik_kubernetes_endpoint | length > 0
+
+- name: Fail if endpoint is not set when RBAC is enabled
+  ansible.builtin.fail:
+    msg: "traefik_kubernetes_endpoint must be set when traefik_kubernetes_rbac_enabled is true"
+  when: traefik_kubernetes_endpoint | length == 0
+
+# ---------------------------------------------------------------------------
+# Optional local dump for vault workflow
+# ---------------------------------------------------------------------------
+- name: Dump kubernetes token to the controller (for vault)
+  ansible.builtin.copy:
+    content: "{{ _traefik_k8s_token }}\n"
+    dest: "{{ traefik_k8s_dump_token_path }}"
+    owner: "{{ lookup('env', 'USER') | default('root') }}"
+    mode: "0600"
+  no_log: true
+  delegate_to: localhost
+  run_once: true
+  when: traefik_k8s_dump_token_locally | bool
+
+- name: Hint for vault encryption
+  ansible.builtin.debug:
+    msg: "Token saved to {{ traefik_k8s_dump_token_path }}. Encrypt it: ansible-vault encrypt {{ traefik_k8s_dump_token_path }}"
+  when: traefik_k8s_dump_token_locally | bool
+
+# ---------------------------------------------------------------------------
+# TLSStore (cert-manager default certificate)
+# ---------------------------------------------------------------------------
+- name: Wait for Traefik TLSStore CRD in the cluster
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ traefik_k8s_kubeconfig }}"
+    kind: CustomResourceDefinition
+    name: tlsstores.traefik.io
+  register: _crd_status
+  retries: 24
+  delay: 5
+  until: _crd_status.resources | length > 0
+  run_once: true
+  when: traefik_k8s_tls_store_enabled | bool
+
+- name: Fail if Traefik TLSStore CRD is absent
+  ansible.builtin.fail:
+    msg: >-
+      Traefik TLSStore CRD (tlsstores.traefik.io) is required.
+      Apply CRDs: kubectl apply -f
+      https://raw.githubusercontent.com/traefik/traefik/{{ traefik_version }}/deploy/crds/traefik.io_crds.yaml
+  when:
+    - traefik_k8s_tls_store_enabled | bool
+    - _crd_status.resources | length == 0
+
+- name: Warn if the cert-manager TLS secret is not found
+  ansible.builtin.debug:
+    msg: >-
+      TLS secret "{{ traefik_k8s_tls_store_secret_name }}" not found
+      in "{{ traefik_k8s_tls_store_namespace }}". The TLSStore will reference
+      it but Traefik will not serve a default cert until cert-manager creates it.
+  when:
+    - traefik_k8s_tls_store_enabled | bool
+    - traefik_k8s_tls_store_secret_name | length > 0
+    - _tls_secret_check is defined and (_tls_secret_check.resources | length == 0)
+
+- name: Check if the TLS secret exists (non-fatal)
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ traefik_k8s_kubeconfig }}"
+    kind: Secret
+    name: "{{ traefik_k8s_tls_store_secret_name }}"
+    namespace: "{{ traefik_k8s_tls_store_namespace }}"
+  register: _tls_secret_check
+  run_once: true
+  when: traefik_k8s_tls_store_enabled | bool
+
+- name: Create TLSStore resource referencing the cert-manager Secret
+  kubernetes.core.k8s:
+    kubeconfig: "{{ traefik_k8s_kubeconfig }}"
+    definition:
+      apiVersion: traefik.io/v1alpha1
+      kind: TLSStore
+      metadata:
+        name: "default"
+        namespace: "{{ traefik_k8s_tls_store_namespace | default(traefik_kubernetes_rbac_namespace) }}"
+      spec:
+        defaultCertificate:
+          secretName: "{{ traefik_k8s_tls_store_secret_name }}"
+    state: present
+  run_once: true
+  when:
+    - traefik_k8s_tls_store_enabled | bool
+    - traefik_k8s_tls_store_secret_name | length > 0

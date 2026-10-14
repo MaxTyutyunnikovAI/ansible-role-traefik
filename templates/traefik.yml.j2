@@ -28,6 +28,16 @@
 {#- Resolver precedence: explicit traefik_cert_resolvers wins; otherwise the
     convenience switch traefik_enable_acme injects a default HTTP-01 resolver;
     otherwise no certificatesResolvers block is emitted at all. -#}
+{% set _resolver_names = _resolvers.keys() | list -%}
+{#- certResolver for the websecure entrypoint is ONLY added when a
+    certificatesResolvers block exists and the user did NOT explicitly set
+    a certResolver in their own static config (check respects overrides).
+    Removes the historical dangling "certResolver: letsencrypt" when ACME
+    is disabled (the resolver key still exists in defaults for back-compat,
+    but the static template deletes it unless ACME is on). -#}
+{% set _ws_tls_cr = _resolver_names[0] if (_resolver_names | length > 0) else '' -%}
+{% set _existing_cr = traefik_static_config.get('entryPoints', {}).get('websecure', {}).get('http', {}).get('tls', {}).get('certResolver', '') -%}
+{% set _ws_tls_extra = {'certResolver': _ws_tls_cr} if (_ws_tls_cr | length > 0 and _existing_cr | length == 0) else {} -%}
 {% set _plugins_dict = {} -%}
 {% for _p in traefik_plugins -%}
 {% set _plugins_dict = _plugins_dict | combine({ _p.name: {'moduleName': _p.moduleName, 'version': _p.version} }) -%}
@@ -105,6 +115,7 @@
                  | combine({'certificatesResolvers': _resolvers}
                            if (_resolvers | length > 0) else {})
                  | combine({'entryPoints': _extra_ep} if (_extra_ep | length > 0) else {}, recursive=True)
+                  | combine({'entryPoints': {'websecure': {'http': {'tls': _ws_tls_extra}}}}, recursive=True)
                  | combine({'metrics': _metrics} if (_metrics | length > 0) else {})
                  | combine({'ping': _ping} if (_ping is not none) else {})
                  | combine({'serversTransport': _servers_transport} if (_servers_transport | length > 0) else {})

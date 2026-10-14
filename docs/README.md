@@ -9,6 +9,7 @@
 |------|-----------|----------|
 | [`playbook-docker-provider.yml`](examples/playbook-docker-provider.yml) | `docker` | Одиночный хост с Docker Engine; сервисы объявляются LABEL'ами контейнеров |
 | [`playbook-k3s-provider.yml`](examples/playbook-k3s-provider.yml) | `kubernetesIngress` / `kubernetesCRD` / `kubernetesGateway` | Сервер(ы) k3s; маршрутизация через Ingress / IngressClass и CRD Traefik |
+| [`group_vars/all.yml`](examples/group_vars/all.yml) | RBAC + cert-manager + presets | Полный сценарий «Traefik снаружи K3s» с автогенерацией токена и CA |
 
 Общие идеи
 ----------
@@ -77,10 +78,12 @@
    поля `kubeconfig` (v3 его отвергает — `field not found`, проверено на
    v3.7.14), а внешний клиент описывается переменными роли
    `traefik_kubernetes_endpoint/token/cert_auth_file`; токен — секрет
-   (ansible-vault, задача шаблона статики идёт с `no_log`). Не
-   cluster-admin в проде — достаточно прав на чтение
-   ingress/service/secret/ingressclass + CRD traefik.io и обновление
-   ingress/status.
+   (ansible-vault, задача шаблона статики идёт с `no_log`).
+   Роль умеет **автоматически создавать** ServiceAccount, ClusterRole
+   (минимальные права на чтение ingress/service/secret/ingressclass +
+   CRD traefik.io и обновление ingress/status), токен и CA
+   (`traefik_kubernetes_rbac_enabled: true`, см. пример
+   `docs/examples/group_vars/all.yml`). Cluster-admin больше не требуется.
 
 4. **ACME.** В обоих примерах включён HTTP-01 через `traefik_enable_acme` и
    `traefik_cert_resolvers`; для DNS-01 токены прокидываются через

@@ -8,6 +8,10 @@
 - name: Include installation tasks (group, user, dirs, binary)
   ansible.builtin.include_tasks: install.yml
 
+- name: Include Kubernetes RBAC / TLSStore bootstrap tasks
+  ansible.builtin.include_tasks: kubernetes.yml
+  when: traefik_kubernetes_rbac_enabled | bool
+
 - name: Include configuration tasks (static + dynamic configs)
   ansible.builtin.include_tasks: configure.yml
 

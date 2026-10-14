@@ -141,3 +141,29 @@
         path: /etc/logrotate.d/traefik
       register: lr
       failed_when: not lr.stat.exists
+
+    - name: Check default middlewares file was deployed (presets enabled)
+      ansible.builtin.stat:
+        path: "{{ traefik_dynamic_config_dir }}/00-default-middlewares.yml"
+      register: dm
+      failed_when: not dm.stat.exists
+
+    - name: Check dashboard htpasswd file was created
+      ansible.builtin.stat:
+        path: "/etc/traefik/dashboard-htpasswd"
+      register: dh
+      failed_when: not dh.stat.exists
+
+    - name: Verify security-headers middleware is present in the rendered file
+      ansible.builtin.slurp:
+        src: "{{ traefik_dynamic_config_dir }}/00-default-middlewares.yml"
+      register: dm_content
+      changed_when: false
+
+    - name: Assert key presets are defined
+      ansible.builtin.assert:
+        that:
+          - "'security-headers' in dm_content.content | b64decode"
+          - "'dashboard-auth' in dm_content.content | b64decode"
+          - "'web-chain' in dm_content.content | b64decode"
+        fail_msg: "Expected presets missing from 00-default-middlewares.yml:\n{{ dm_content.content | b64decode }}"

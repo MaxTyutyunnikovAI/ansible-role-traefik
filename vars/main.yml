@@ -49,8 +49,7 @@ traefik_role_defaults:
       websecure:
         address: ":443"
         http:
-          tls:
-            certResolver: letsencrypt
+          tls: {}
 
     log:
       level: INFO

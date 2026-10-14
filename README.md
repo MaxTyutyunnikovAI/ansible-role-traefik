@@ -23,6 +23,8 @@ Ansible-роль для установки Traefik v3 в качестве system
 * Дистрибутив на базе systemd (роль выполняет `assert` при проверке факта `service_mgr`).
 * Ansible >= 2.10.
 * На целевом хосте должны присутствовать `tar`, `gzip`, `procps-ng` (для unarchive и pgrep) и `logrotate` — в Molecule-сценарии они ставятся в `pre_tasks`.
+* Для автоматического RBAC (Задача 1) требуется коллекция `kubernetes.core` (в `requirements.yml`) и пакет `python3-kubernetes` на целевом хосте.
+* Для автогенерации htpasswd дашборда (Задача 3) требуется пакет `python3-passlib` на целевом хосте.
 
 Переменные роли
 --------------
@@ -85,14 +87,36 @@ traefik_kubernetes_ingress_extra: {}       # опции только kubernetesI
 traefik_kubernetes_crd_extra: {}           # только kubernetesCRD (allowExternalNameServices и т.п.)
 traefik_kubernetes_gateway_extra: {}       # только kubernetesGateway
 
+# Kubernetes RBAC (автоматическое создание SA/ClusterRole/токена)
+traefik_kubernetes_rbac_enabled: false           # master switch (см. docs/examples/group_vars/all.yml)
+traefik_kubernetes_rbac_namespace: "traefik"
+traefik_k8s_kubeconfig: "/etc/rancher/k3s/k3s.yaml"
+traefik_k8s_token_file: "{{ traefik_config_dir }}/k8s-token"          # путь-файл, не в статике
+traefik_k8s_ca_file: "{{ traefik_config_dir }}/k3s-client-ca.crt"
+traefik_k8s_dump_token_locally: false            # дамп на контроллер для ansible-vault
+
+# cert-manager / TLSStore (дефолтный серт из Kubernetes Secret)
+traefik_k8s_tls_store_enabled: false
+traefik_k8s_tls_store_secret_name: ""            # Secret от cert-manager (tls.crt/tls.key)
+
 # Дашборд (conf.d/05-dashboard.yml при traefik_dashboard_enabled=true)
 traefik_dashboard_enabled: false        # true -> роутер dashboard -> api@internal (нужен при api.insecure=false)
 traefik_dashboard_host: ""              # Host(...) правила — задавайте явно; иначе traefik.<ansible_facts.domain>
 traefik_dashboard_entrypoint: "websecure"
-traefik_dashboard_middlewares: []       # e.g. ["dashboard-auth", "internal"]
+traefik_dashboard_middlewares: "{{ ['dashboard-auth'] if traefik_enable_dashboard_basic_auth else [] }}"
 traefik_dashboard_users: []             # htpasswd-строки ["admin:$2b$..."] — алиас из роли traefik2
 traefik_dashboard_basic_auth: "{{ traefik_dashboard_users }}"  # dashboard-auth в 00-default-middlewares.yml; приоритет при задании обоих
 traefik_dashboard_trusted_ips: []       # ipAllowList -> middleware "internal" (в middlewares — первым)
+
+# Пресеты middleware (File Provider, включены по умолчанию)
+traefik_enable_security_headers: true
+traefik_enable_rate_limit: false
+traefik_rate_limit_average: 100
+traefik_rate_limit_burst: 50
+traefik_enable_dashboard_basic_auth: true
+traefik_dashboard_admin_user: "admin"
+traefik_dashboard_admin_password: ""      # из vault; "" = автогенерация
+traefik_middlewares_chain_name: "web-chain"  # chain presets для быстрого подключения
 
 # Logrotate
 traefik_logrotate_enabled: true
@@ -101,7 +125,14 @@ traefik_logrotate_rotate: 14
 traefik_logrotate_maxsize: "100M"
 ```
 
-Статическая конфигурация по умолчанию включает entry points `web` (:80 с редиректом на HTTPS) и `websecure` (:443, certResolver `letsencrypt`), JSON-логирование, accessLog, API dashboard и file provider. Полностью переопределяется словарём `traefik_static_config`.
+Статическая конфигурация по умолчанию включает entry points `web` (:80 с редиректом на HTTPS) и `websecure` (:443, TLS), JSON-логирование, accessLog, API dashboard и file provider. Полностью переопределяется словарём `traefik_static_config`.
+
+> ⚠️ `certResolver: letsencrypt` в entry point `websecure` рендерится **только**
+> если в кластере настроен ACME-резолвер (`traefik_enable_acme: true` или
+> `traefik_cert_resolvers`). При отсутствии резолвера (например, при
+> использовании сертификатов из cert-manager через TLSStore CRD) ссылка на
+> несуществующий резолвер не генерируется — Traefik не выводит предупреждение
+> и использует встроенный самоподписанный сертификат как fallback.
 
 > ⚠️ При переиспользовании дефолтов в собственном определении `traefik_static_config`
 > (например, `{{ traefik_static_config | combine(...) }}` или
@@ -194,8 +225,71 @@ traefik_generated_routers:
 Готовые примеры подключения провайдеров (Docker, Kubernetes/k3s) и установки
 плагинов — в каталоге [`docs/`](docs/README.md):
 
-* `docs/examples/playbook-docker-provider.yml` — Docker Provider + LABEL'ы контейнеров + плагин (`experimental.plugins`, `traefik trial --download`);
-* `docs/examples/playbook-k3s-provider.yml` — Kubernetes-провайдеры (Ingress/CRD/Gateway) на базе k3s через переменные `traefik_kubernetes_*` + CRD-Middleware на плагине.
+* `docs/examples/playbook-docker-provider.yml` — Docker Provider + LABEL'ы контейнеров + плагин;
+* `docs/examples/playbook-k3s-provider.yml` — Kubernetes-провайдеры (Ingress/CRD/Gateway) на базе k3s;
+* `docs/examples/group_vars/all.yml` — полный пример сценария «Traefik снаружи K3s»: RBAC, cert-manager, пресеты middleware.
+
+Расширенные возможности
+-----------------------
+
+### 1. RBAC и генерация токена Kubernetes (Задача 1)
+
+При `traefik_kubernetes_rbac_enabled: true` роль выполняет последовательность
+шагов через модули `kubernetes.core.k8s`:
+1. Создаёт Namespace (опционально), ServiceAccount, ClusterRole (права на
+   чтение Ingress, Services, Endpoints, Secrets, Traefik CRD, Gateway) и
+   ClusterRoleBinding.
+2. Создаёт Secret типа `kubernetes.io/service-account-token`.
+3. Извлекает токен (retry до заполнения контроллером) и CA-сертификат
+   из kubeconfig узла (или из Configmap `kube-root-ca.crt`).
+4. Записывает токен в файл (`{{ traefik_k8s_token_file }}`, Traefik v3.7+
+   поддерживает путь вместо значения), CA — в `{{ traefik_k8s_ca_file }}`.
+5. Передаёт значения через `set_fact` в `traefik_kubernetes_token` (путь)
+   и `traefik_kubernetes_cert_auth_file`.
+6. Опционально — дамп токена на контроллер (`traefik_k8s_dump_token_locally: true`)
+   для последующего шифрования `ansible-vault encrypt`.
+
+Все таски с токенами имеют `no_log: true`. Требуется коллекция `kubernetes.core`
+(в `requirements.yml`) и пакет `python3-kubernetes` на целевом хосте.
+
+### 2. Интеграция с cert-manager (Задача 2)
+
+Дефолтный сертификат задаётся через CRD **TLSStore** (`traefik.io/v1alpha1`),
+который ссылается на Kubernetes Secret, выпущенный cert-manager:
+```yaml
+traefik_k8s_tls_store_enabled: true
+traefik_k8s_tls_store_secret_name: "wildcard-example-com-tls"
+```
+
+Дополнительно поддерживается **file-based** вариант (без Kubernetes CRD) —
+динамическая конфигурация `tls/stores/default/defaultCertificate` из
+переменной `traefik_default_certificate`.
+
+Если ACME/Let's Encrypt не используется, `certResolver: letsencrypt` из
+entry point `websecure` автоматически удаляется — висячих ссылок на
+несуществующий резолвер не возникает.
+
+### 3. Пресеты middleware и цепочка web-chain (Задача 3)
+
+Три независимых булевых переключателя управляют включением типовых middleware:
+
+| Переменная | По умолч. | Middleware |
+|---|---|---|
+| `traefik_enable_security_headers` | `true` | `X-Frame-Options`, `HSTS`, `XSS-Protection`, `contentTypeNosniff`, `referrerPolicy` |
+| `traefik_enable_rate_limit` | `false` | `rateLimit` (average 100, burst 50, period 1s) |
+| `traefik_enable_dashboard_basic_auth` | `true` | `basicAuth` для API/dashboard |
+
+Мидлвары рендерятся в `conf.d/00-default-middlewares.yml` и собираются в
+цепочку **`web-chain`** — укажите её в роутере:
+```yaml
+middlewares: ["web-chain@file"]
+```
+
+Пароль дашборда либо задаётся из vault (`traefik_dashboard_admin_password`),
+либо генерируется автоматически при первом запуске и сохраняется в
+`{{ traefik_config_dir }}/dashboard-admin-password` (root:root 0600).
+Htpasswd-файл создаётся модулем `community.general.htpasswd` со схемой
+`apr_md5_crypt` (поддерживается Traefik). Требуется пакет `python3-passlib`.
 
 Тестирование
 ------------

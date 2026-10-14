@@ -106,8 +106,7 @@ traefik_static_config:
     websecure:
       address: ":443"
       http:
-        tls:
-          certResolver: letsencrypt
+        tls: {}
 
   log:
     level: INFO
@@ -382,6 +381,74 @@ traefik_default_middlewares:
 traefik_dashboard_enabled: false
 traefik_dashboard_entrypoint: "websecure"
 traefik_dashboard_rule: "Host(`{{ traefik_dashboard_host | default('traefik.' + (ansible_facts['domain'] | default('localhost'))) }}`)"
-traefik_dashboard_middlewares: []              # e.g. ["dashboard-auth", "internal"]
+traefik_dashboard_middlewares: "{{ ['dashboard-auth'] if traefik_enable_dashboard_basic_auth else [] }}"
 # Named IP allow-list middleware rendered together with the dashboard file:
 traefik_dashboard_trusted_ips: []              # e.g. ["10.0.0.0/8", "127.0.0.1/32"]
+
+# ----------------------------------------------------------------------------
+# KUBERNETES RBAC / TOKEN (task: kubernetes.yml)
+# When traefik_kubernetes_rbac_enabled is true the role auto-creates
+# ServiceAccount, ClusterRole, ClusterRoleBinding and a
+# service-account-token Secret in the cluster, writes the token and CA to
+# static files and sets traefik_kubernetes_token / cert_auth_file for the
+# Traefik kubernetes provider variables (set_fact, no_log on secrets).
+# The k8s modules run on the target host using kubeconfig
+# traefik_k8s_kubeconfig (delegate_to via traefik_k8s_rbac_delegate_to).
+# ----------------------------------------------------------------------------
+traefik_kubernetes_rbac_enabled: false             # master switch
+traefik_kubernetes_rbac_namespace: "traefik"
+traefik_kubernetes_rbac_create_namespace: true
+traefik_kubernetes_rbac_sa_name: "traefik-external"
+traefik_kubernetes_rbac_cluster_role_name: "traefik-external"
+traefik_kubernetes_rbac_binding_name: "traefik-external"
+traefik_kubernetes_rbac_token_secret_name: "traefik-external-token"
+# Fine-grained default rules; append custom rules with this var.
+traefik_k8s_cluster_role_rules: []
+traefik_k8s_rbac_extra_rules: []
+# Connection: kubeconfig path; run on target (empty) or delegate.
+traefik_k8s_kubeconfig: "/etc/rancher/k3s/k3s.yaml"
+traefik_k8s_rbac_delegate_to: ""
+# Token is written to this file (path-based — Traefik v3.7+ re-reads from
+# the file at provider init; no secret lands in the static config).
+traefik_k8s_token_file: "{{ traefik_config_dir }}/k8s-token"
+# CA bundle from the cluster kubeconfig (not the k3s client-ca.crt — the
+# authoritative CA that signed the kube-apiserver serving certificate).
+traefik_k8s_ca_file: "{{ traefik_config_dir }}/k3s-client-ca.crt"
+# Dump the token to the controller for vault-based workflows (no_log).
+traefik_k8s_dump_token_locally: false
+traefik_k8s_dump_token_path: "~/.cache/w0.traefik/k8s-token"
+
+# ----------------------------------------------------------------------------
+# CERT-MANAGER / TLSStore (kubernetes CRD)
+# When the kubernetesCRD provider is enabled and the Traefik CRDs are
+# installed in the cluster, the role can create a k8s TLSStore resource
+# pointing at a cert-manager Secret for the default certificate.
+# In the static config the dangling "certResolver: letsencrypt" is removed
+# (only emitted when ACME resolvers actually exist).
+# ----------------------------------------------------------------------------
+traefik_k8s_tls_store_enabled: false
+traefik_k8s_tls_store_secret_name: ""            # e.g. wildcard-tls (cert-manager)
+traefik_k8s_tls_store_namespace: "{{ traefik_kubernetes_rbac_namespace }}"
+
+# File-provider fallback (no k8s): {certFile: path, keyFile: path}
+traefik_default_certificate: {}                   # rendered into conf.d/tls-store.yml
+
+# ----------------------------------------------------------------------------
+# PRESET MIDDLEWARES (File Provider — rendered into 00-default-middlewares.yml)
+# Independent booleans that each add a middleware definition plus a chain
+# middleware (traefik_middlewares_chain_name) that groups the active ones.
+# LEGACY traefik_default_middlewares_enabled is still supported and adds
+# its dict (security-headers + https-redirect) as before.
+# ----------------------------------------------------------------------------
+traefik_enable_security_headers: true
+traefik_security_headers_extra: {}                # merged over default headers
+traefik_enable_rate_limit: false
+traefik_rate_limit_average: 100
+traefik_rate_limit_burst: 50
+traefik_rate_limit_period: "1s"
+traefik_enable_dashboard_basic_auth: true
+traefik_dashboard_admin_user: "admin"
+traefik_dashboard_admin_password: ""              # vault; empty = auto-generate
+traefik_dashboard_htpasswd_file: "{{ traefik_config_dir }}/dashboard-htpasswd"
+traefik_dashboard_password_file: "{{ traefik_config_dir }}/dashboard-admin-password"
+traefik_middlewares_chain_name: "web-chain"

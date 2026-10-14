@@ -178,6 +178,97 @@ playbook-k3s-provider.yml`); роль только рендерит конфиг
   ломает роутер — список и источники должны меняться парно (это задокументировано
   в комментарии плейбука `playbooks/server-ru/_traefik.yml`).
 
-## 12. Что можно улучшить (см. TODO.md)
-- Настроить `certificatesResolvers` для letsencrypt (сейчас указан, но не определён).
-- Расширить verify-тесты Molecule (ротация логов, поведение при битом конфиге).
+## 12. RBAC — в роли, а не в отдельной обёртке
+**Решение**: автоматическое создание ServiceAccount, ClusterRole, токена и CA
+реализовано опциональным модулем `tasks/kubernetes.yml` внутри той же роли, с
+master switch `traefik_kubernetes_rbac_enabled: false`.
+
+**Почему**: (1) RBAC — это подготовка данных для переменных роли (`traefik_kubernetes_token`,
+`traefik_kubernetes_cert_auth_file`); вынесение в отдельную роль создало бы циклическую
+или жёстко-упорядоченную зависимость с дублированием имён переменных. (2) Ресурсы
+кластера (SA, ClusterRole, Secret) — не внутрикаталожные артефакты Traefik, а внешние
+объекты K8s, но их создание — первый шаг в сценарии «Traefik снаружи K3s», и удобно
+иметь его под одним entry point. (3) `set_fact` напрямую передаёт значения в
+`traefik_kubernetes_token`/`cert_auth_file`, что гарантирует согласованность.
+
+**Альтернативы (отклонены)**: отдельная wrapper-роль (два релиза, дублирование doc;
+переменные роли Traefik нужно либо дублировать, либо использовать `include_role` с vars);
+ручное создание через `k3s kubectl` в плейбуке (пример playbook-k3s-provider.yml — работало,
+но каждый пользователь переписывал свои таски с kubectl).
+
+## 13. Доставка токена: путь к файлу, не значение
+**Решение**: токен записывается в файл `{{ traefik_k8s_token_file }}` (права `0640`
+traefik:traefik), а set_fact передаёт **путь** к этому файлу. Traefik v3.7+ умеет
+читать `providers.kubernetes*.token` как путь.
+
+**Почему**: (1) токен никогда не появляется в статической конфигурации
+`traefik.yml` (шаблон получает `traefik_kubernetes_token = "/etc/traefik/k8s-token"`,
+а не сам JWT). (2) при ротации токена достаточно обновить файл и перезапустить
+сервис — конфиг не меняется (не нужен probe-цикл обновления статики). (3) выписанный
+в файл токен можно опционально скопировать на контроллер (`delegate_to: localhost`)
+для шифрования `ansible-vault encrypt` без вывода в логи.
+
+**Альтернативы (отклонены)**: передача токена set_fact (значение попадает в шаблон →
+в rendered traefik.yml, задача идёт с no_log, но токен оседает на диске в конфиге —
+избыточная экспозиция; отказ vault workflow). Автоматическая запись в ansible-vault
+на контроллере (Ansible не умеет шифровать vault-файлы изнутри playbook без внешних
+инструментов).
+
+## 14. CA из kubeconfig, не из client-ca.crt
+**Решение**: CA-сертификат извлекается из kubeconfig-файла (поле
+`certificate-authority-data` — base64-кодированный PEM — или поле
+`certificate-authority` — путь к файлу). Fallback — ConfigMap `kube-root-ca.crt`.
+
+**Почему**: kubeconfig содержит именно тот CA, который служит для проверки
+сертификата kube-apiserver’а. В k3s файл `/var/lib/rancher/k3s/server/tls/client-ca.crt`
+(использованный в старом примере) — это CA для клиентских сертификатов, не
+обязательно подписывающий serving-сертификат API. Использование CA из
+kubeconfig гарантирует, что Traefik сможет верифицировать TLS endpoint.
+
+**Альтернатива (отклонена)**: копирование `/var/lib/rancher/k3s/server/tls/server-ca.crt`
+(зависит от версии k3s, не гарантирован на всех хостах). ConfigMap
+`kube-root-ca.crt` (присутствует с k8s ≥ 1.21; но не содержит CA, если кэш
+корневого CA отключён/настроен нестандартно).
+
+## 15. TLSStore CRD вместо file provider для дефолтного сертификата
+**Решение**: создание ресурса `TLSStore` (`traefik.io/v1alpha1`) со ссылкой на
+Kubernetes Secret (`spec.defaultCertificate.secretName`). Дополнительно —
+file-based fallback через `traefik_default_certificate`.
+
+**Почему**: File Provider читает TLS-сертификаты из файловой системы
+(`certFile`/`keyFile`), но cert-manager хранит их в Kubernetes Secrets. Единственный
+нативный способ для Traefik получить сертификат из Secret — CRD TLSStore
+(kubernetesCRD provider). SecretName указывает на Secret, где cert-manager
+сохраняет ключи (`tls.crt`/`tls.key`/`ca.crt`).
+
+**Ограничение**: TLSStore требует установленных CRD `traefik.io` и активного
+провайдера kubernetesCRD. Роль проверяет CRD перед созданием (`k8s_info` с retry)
+и даёт понятный hint в случае отсутствия.
+
+## 16. Htpasswd: apr_md5_crypt вместо bcrypt
+**Решение**: модуль `community.general.htpasswd` со схемой `apr_md5_crypt` (MD5-crypt,
+префикс `$apr1$`). Требует `python3-passlib` (чистый Python, без bcrypt-зависимостей).
+
+**Почему**: Traefik официально поддерживает MD5 `$apr1$` (документация Traefik
+показывает именно `$apr1$` в примерах basicAuth). `apr_md5_crypt` — это схема из
+passlib, не требующая дополнительных библиотек (pure Python). bcrypt потребовал бы
+`python3-bcrypt` + компиляцию на целевом хосте, что тяжелее для дефолтного сценария.
+
+## 17. Пресеты middleware: цепочка и независимые переключатели
+**Решение**: три независимые переменные `traefik_enable_*` (security-headers,
+rate-limit, dashboard-auth), каждая добавляет middleware-определение в
+`00-default-middlewares.yml` и, если включено, включает middleware в цепочку
+`web-chain` (`chain.middlewares`).
+
+**Почему**: (1) независимые переключатели позволяют включать только нужное —
+security-headers по умолчанию, rate-limit опционально. (2) `web-chain` — это
+отдельное middleware типа `chain`, собирающее активные пресеты; роутеры
+подключают одну точку: `middlewares: ["web-chain@file"]`. (3) dashboard-auth
+намеренно НЕ включается в общую цепь — он должен применяться только к
+дашборду/API. (4) `traefik_default_middlewares_enabled` оставлен для обратной
+совместимости: его словарь рендерится наряду с новыми пресетами.
+
+**Альтернативы (отклонены)**: единый словарь `traefik_middlewares_presets`
+(меньше переменных, но сложнее комбинировать с легаси-настройками).
+Жёстко зашитый chain (каждый новый пресет молниеносно применяется ко всем
+роутерам — конфликт с безопасностью).

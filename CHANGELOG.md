@@ -7,6 +7,30 @@
 ## [Не выпущено]
 
 ### Добавлено
+- **RBAC и автоматический токен Kubernetes (Задача 1)**: новый опциональный
+  модуль `tasks/kubernetes.yml` (включается `traefik_kubernetes_rbac_enabled`)
+  создаёт Namespace, ServiceAccount, ClusterRole (минимальные права),
+  ClusterRoleBinding и Secret типа `kubernetes.io/service-account-token`.
+  Токен извлекается из Secret (retry until `data.token`), CA — из kubeconfig
+  (с fallback на ConfigMap `kube-root-ca.crt`). Токен записывается в файл
+  (`k8s-token`, 0640) и передаётся роли как **путь** (Traefik v3.7+
+  поддерживает `token` = file path; секрет не попадает в статическую
+  конфигурацию). Опциональный дамп на контроллер для ansible-vault
+  (`traefik_k8s_dump_token_locally`). Все чувствительные таски — `no_log`.
+  Требует `kubernetes.core` и `python3-kubernetes`.
+- **Интеграция с cert-manager (Задача 2)**: создание CRD TLSStore
+  (`traefik.io/v1alpha1`), ссылающегося на Kubernetes Secret от
+  cert-manager (`traefik_k8s_tls_store_secret_name`). File-based fallback
+  через динамическую конфигурацию `tls/stores/default/defaultCertificate`
+  (`traefik_default_certificate: {}`). RBAC включает права на чтение Secrets.
+- **Пресеты middleware (Задача 3)**: три независимых булевых переключателя
+  (`traefik_enable_security_headers`, `traefik_enable_rate_limit`,
+  `traefik_enable_dashboard_basic_auth`) рендерят соответствующие middleware
+  в `00-default-middlewares.yml` и собирают chain `web-chain`.
+  Dashboard auth — с автогенерацией htpasswd (схема `apr_md5_crypt`, через
+  `community.general.htpasswd` + `python3-passlib`) или inline users для
+  обратной совместимости. Пароль дашборда — из vault либо генерация при
+  первом запуске (сохраняется в корневой файл 0600).
 - **Первоклассная поддержка Kubernetes/k3s**: переменные `traefik_kubernetes_*`
   (`traefik_kubernetes_enabled` + по-провайдерные `ingress/crd/gateway_enabled`,
   connection `endpoint`/`token`/`cert_auth_file`, `ingress_class`, per-provider
@@ -32,6 +56,23 @@
   поэтому старые var'ы работают без правок; при задании обоих приоритет у
   `traefik_dashboard_basic_auth`. В middleware `dashboard-auth` добавлен
   `realm: Traefik` (паритет с traefik2 — окно авторизации подписано «Traefik»).
+
+### Изменено
+- `traefik_enable_security_headers` и `traefik_enable_dashboard_basic_auth`
+  по умолчанию `true` — при обновлении роли на существующем хосте появится
+  файл `00-default-middlewares.yml` (security-headers + dashboard-auth),
+  и будет сгенерирован пароль для дашборда (сохраняется в
+  `dashboard-admin-password`). Обратная совместимость: при
+  `traefik_default_middlewares_enabled: true` поведение не меняется,
+  legacy-словарь `traefik_default_middlewares` по-прежнему рендерится.
+- `traefik_dashboard_middlewares` теперь по умолчанию динамическое —
+  включает `dashboard-auth` при `traefik_enable_dashboard_basic_auth: true`.
+- Из статической конфигурации entry point `websecure` **удалён** `certResolver:
+  letsencrypt` в `defaults/main.yml` (и соответствующая копия в `vars/main.yml`).
+  Резолвер теперь добавляется шаблоном **только** когда настроен ACME
+  (`traefik_enable_acme` / `traefik_cert_resolvers`). Висячая ссылка на
+  несуществующий резолвер больше не генерируется; Traefik не пишет предупреждение
+  и использует встроенный fallback-сертификат.
 
 ### Исправлено
 - **Цепочка валидации перезаписана под Traefik v3**: офлайн-режима `--check` в v3 не

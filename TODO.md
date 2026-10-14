@@ -3,11 +3,11 @@
 Роль: `w0.traefik` (Ansible, Traefik v3 как systemd-сервис).
 
 ## Высокий приоритет
-- [ ] Добавить интеграцию Let's Encrypt (ACME): сертификат-резолвер `letsencrypt` указан в конфигурации по умолчанию, но `certificatesResolvers` в `traefik_static_config` не настроен — без него `websecure` не сможет получить сертификаты.
 - [ ] Расширить тесты: verify-сценарии Molecule (идемпотентность после смены версии, поведение при битом конфиге).
+- [ ] Добавить Molecule-тест для `traefik_dashboard_enabled` (проверка роутера дашборда).
 
 ## Средний приоритет
-- [ ] Опциональная настройка middleware по умолчанию (compress, headers, rate-limit) в динамической конфигурации.
+- [x] Опциональная настройка middleware по умолчанию (security-headers, rate-limit, dashboard-auth) — Задача 3 реализована через `traefik_enable_*`.
 - [ ] Документировать схему миграции с предыдущих версий роли (изменения структуры переменных) в README.
 - [ ] Molecule/k3s-smoke: проверка рендера статики с `traefik_kubernetes_enabled` валидностью
       бинарником (без реального API — ошибки провайдеров уходят в лог-файл) и без

@@ -127,7 +127,77 @@
   when: traefik_dynamic_configs_template | length == 0
   notify: validate_and_restart_traefik
 
-- name: Render default middlewares file (security headers, https redirect)
+# --- PRESET MIDDLEWARES (00-default-middlewares.yml) ------------------------
+# htpasswd file for dashboard auth (usersFile mode, when no inline users given)
+- name: Generate dashboard htpasswd from vault-provided password
+  community.general.htpasswd:
+    name: "{{ traefik_dashboard_admin_user }}"
+    password: "{{ traefik_dashboard_admin_password }}"
+    path: "{{ traefik_dashboard_htpasswd_file }}"
+    crypt_scheme: apr_md5_crypt
+    owner: "{{ traefik_config_owner }}"
+    group: "{{ traefik_config_group }}"
+    mode: "0640"
+  no_log: true
+  notify: validate_and_restart_traefik
+  when:
+    - traefik_enable_dashboard_basic_auth | bool
+    - traefik_dashboard_basic_auth | length == 0
+    - traefik_dashboard_admin_password | length > 0
+
+- name: Auto-generate dashboard htpasswd and admin password file
+  when:
+    - traefik_enable_dashboard_basic_auth | bool
+    - traefik_dashboard_basic_auth | length == 0
+    - traefik_dashboard_admin_password | length == 0
+  block:
+    - name: Stat existing dashboard auth files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ traefik_dashboard_password_file }}"
+        - "{{ traefik_dashboard_htpasswd_file }}"
+      register: _dash_auth_stat
+
+    - name: Read existing dashboard admin password
+      ansible.builtin.slurp:
+        src: "{{ traefik_dashboard_password_file }}"
+      register: _dash_pass_slurp
+      no_log: true
+      when: _dash_auth_stat.results[0].stat.exists | default(false)
+
+    - name: Set dashboard admin password fact (existing or new random)
+      ansible.builtin.set_fact:
+        _dash_admin_pass: >-
+          {{ (_dash_pass_slurp.content | b64decode).strip()
+             if (_dash_pass_slurp is defined and _dash_pass_slurp.content is defined
+                 and (_dash_pass_slurp.content | b64decode).strip() | length > 0)
+             else lookup('password', '/dev/null chars=ascii_letters,digits length=24') }}
+      no_log: true
+
+    - name: Write dashboard admin password to a root-only file
+      ansible.builtin.copy:
+        content: "{{ _dash_admin_pass }}\n"
+        dest: "{{ traefik_dashboard_password_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Create/update dashboard htpasswd from generated password
+      community.general.htpasswd:
+        name: "{{ traefik_dashboard_admin_user }}"
+        password: "{{ _dash_admin_pass }}"
+        path: "{{ traefik_dashboard_htpasswd_file }}"
+        crypt_scheme: apr_md5_crypt
+        owner: "{{ traefik_config_owner }}"
+        group: "{{ traefik_config_group }}"
+        mode: "0640"
+      no_log: true
+      notify: validate_and_restart_traefik
+
+# Render the 00-default-middlewares.yml file based on enabled presets.
+- name: Render default middlewares file (presets and chain)
   ansible.builtin.copy:
     content: "{{ {'http': {'middlewares': _middlewares}} | to_nice_yaml(indent=2) }}"
     dest: "{{ traefik_dynamic_config_dir }}/00-default-middlewares.yml"
@@ -135,22 +205,49 @@
     group: "{{ traefik_config_group }}"
     mode: "{{ traefik_config_mode }}"
   vars:
-    # traefik_default_middlewares + optional dashboard basicAuth middleware
-    # (basicAuth is only emitted when htpasswd users are provided — an empty
-    # list would make the router reject every request).
+    _legacy_mws: "{{ traefik_default_middlewares if (traefik_default_middlewares_enabled | bool) else {} }}"
+    _sec_headers_mw: >-
+      {{ {'security-headers': traefik_default_middlewares['security-headers']
+           | combine(traefik_security_headers_extra)}
+         if (traefik_enable_security_headers | bool) else {} }}
+    _rate_limit_mw: >-
+      {{ {'rate-limit': {'rateLimit': {'average': traefik_rate_limit_average | int,
+                                       'burst': traefik_rate_limit_burst | int,
+                                       'period': traefik_rate_limit_period}}}
+         if (traefik_enable_rate_limit | bool) else {} }}
+    _dash_auth_mw: >-
+      {{ {'dashboard-auth': {'basicAuth': {'users': traefik_dashboard_basic_auth,
+                                            'realm': 'Traefik'}}}
+         if (traefik_enable_dashboard_basic_auth | bool
+             and (traefik_dashboard_basic_auth | length > 0))
+         else {'dashboard-auth': {'basicAuth': {'usersFile': traefik_dashboard_htpasswd_file,
+                                                  'realm': 'Traefik'}}}
+         if (traefik_enable_dashboard_basic_auth | bool)
+         else {} }}
+    _chain_items: >-
+      {{ (['security-headers'] if (traefik_enable_security_headers | bool) else [])
+         + (['rate-limit'] if (traefik_enable_rate_limit | bool) else []) }}
+    _chain_mw: >-
+      {{ {traefik_middlewares_chain_name: {'chain': {'middlewares': _chain_items}}}
+         if (_chain_items | length > 0) else {} }}
     _middlewares: >-
-      {{ traefik_default_middlewares
-         | combine(({'dashboard-auth': {'basicAuth': {'users': traefik_dashboard_basic_auth,
-                                                      'realm': 'Traefik'}}}
-                    if (traefik_dashboard_basic_auth | length > 0) else {})) }}
-  when: traefik_default_middlewares_enabled | bool
+      {{ _legacy_mws
+         | combine(_sec_headers_mw)
+         | combine(_rate_limit_mw)
+         | combine(_dash_auth_mw)
+         | combine(_chain_mw) }}
+  when: >-
+    (traefik_default_middlewares_enabled | bool)
+    or (traefik_enable_security_headers | bool)
+    or (traefik_enable_rate_limit | bool)
+    or (traefik_enable_dashboard_basic_auth | bool)
   notify: validate_and_restart_traefik
 
 # Dashboard router (File Provider dynamic config). Needed because the role's
 # default static config keeps `api.insecure: false`: with insecure off the
 # dashboard/api is ONLY reachable through a named router bound to an existing
 # entryPoint. Protect it via traefik_dashboard_middlewares (e.g. the
-# "dashboard-auth" basicAuth middleware or the "internal" ipAllowList built
+# dashboard-auth basicAuth middleware or the "internal" ipAllowList built
 # from traefik_dashboard_trusted_ips).
 - name: Render dashboard router dynamic configuration
   ansible.builtin.template:
@@ -169,13 +266,33 @@
   when: not (traefik_dashboard_enabled | bool)
   notify: validate_and_restart_traefik
 
-# `file: state=absent` is natively idempotent: it reports no change when the
-# file is already gone, so the notify fires only on a real removal.
-- name: Remove default middlewares file when the option is disabled
+- name: Remove default middlewares file when all presets are disabled
   ansible.builtin.file:
     path: "{{ traefik_dynamic_config_dir }}/00-default-middlewares.yml"
     state: absent
-  when: not (traefik_default_middlewares_enabled | bool)
+  when: >-
+    not (traefik_default_middlewares_enabled | bool)
+    and not (traefik_enable_security_headers | bool)
+    and not (traefik_enable_rate_limit | bool)
+    and not (traefik_enable_dashboard_basic_auth | bool)
+  notify: validate_and_restart_traefik
+
+# --- Default TLS certificate from file (cert-manager helper, no-k8s variant) ---
+- name: Render default TLS certificate file (file-based fallback)
+  ansible.builtin.copy:
+    content: "{{ {'tls': {'stores': {'default': {'defaultCertificate': traefik_default_certificate}}}} | to_nice_yaml(indent=2) }}\n"
+    dest: "{{ traefik_dynamic_config_dir }}/tls-default-cert.yml"
+    owner: "{{ traefik_config_owner }}"
+    group: "{{ traefik_config_group }}"
+    mode: "{{ traefik_config_mode }}"
+  when: traefik_default_certificate | length > 0
+  notify: validate_and_restart_traefik
+
+- name: Remove default TLS certificate file when option is unset
+  ansible.builtin.file:
+    path: "{{ traefik_dynamic_config_dir }}/tls-default-cert.yml"
+    state: absent
+  when: traefik_default_certificate | length == 0
   notify: validate_and_restart_traefik
 
 # NOTE ON DYNAMIC CONFIG VALIDATION (verified empirically with Traefik v3):

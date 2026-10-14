@@ -1,0 +1,105 @@
+---
+# ============================================================================
+# group_vars/all.yml — пример полной конфигурации для сценария
+# "Traefik снаружи K3s" (RBAC / cert-manager / middleware presets)
+# ============================================================================
+#
+# Предполагаемая топология:
+#   Traefik установлен systemd-ролью w0.traefik на узле кластера k3s.
+#   k3s API: https://127.0.0.1:6443 (kubeconfig /etc/rancher/k3s/k3s.yaml).
+#   Встроенный Traefik из k3s helm-чарта удалён.
+#   cert-manager управляет TLS-сертификатами (Secret типа kubernetes.io/tls).
+#   IngressClass "traefik" объявлен.
+# ============================================================================
+
+# ---- Версия Traefik -------------------------------------------------------
+traefik_version: "v3.7.14"
+
+# ---- Kubernetes-провайдеры (все три) ---------------------------------------
+traefik_kubernetes_enabled: true
+traefik_kubernetes_endpoint: "https://127.0.0.1:6443"
+# Токен и CA роль получит автоматически через RBAC (см. ниже).
+# traefik_kubernetes_token:        # <— заполняется set_fact из RBAC
+# traefik_kubernetes_cert_auth_file:  # <— заполняется set_fact из RBAC
+traefik_kubernetes_ingress_class: "traefik"
+traefik_kubernetes_crd_extra:
+  allowExternalNameServices: true
+  allowEmptyServices: true
+
+# Задача 1 — автоматический RBAC и токен
+traefik_kubernetes_rbac_enabled: true
+traefik_kubernetes_rbac_namespace: "traefik"
+# traefik_kubernetes_rbac_sa_name: "traefik-external"          # по умолчанию
+# traefik_kubernetes_rbac_cluster_role_name: "traefik-external"
+# traefik_k8s_kubeconfig: "/etc/rancher/k3s/k3s.yaml"
+# Дополнительные правила (необязательно):
+# traefik_k8s_rbac_extra_rules:
+#   - apiGroups: ["custom.io"]
+#     resources: ["customresources"]
+#     verbs: ["get", "list"]
+
+# Опционально — сохранить токен на контроллере для vault-воркфлоу:
+# traefik_k8s_dump_token_locally: true
+# traefik_k8s_dump_token_path: "~/.cache/w0.traefik/k8s-token"
+
+# Задача 2 — cert-manager (TLS-сертификаты через K8s Secrets)
+# Вместо встроенного ACME/Let's Encrypt.
+traefik_enable_acme: false                                       # не используем ACME
+traefik_k8s_tls_store_enabled: true
+traefik_k8s_tls_store_secret_name: "wildcard-example-com-tls"   # secret от cert-manager
+traefik_k8s_tls_store_namespace: "{{ traefik_kubernetes_rbac_namespace }}"
+
+# Задача 3 — пресеты middleware (File Provider)
+# Включаются по умолчанию; отключить ненужное.
+# traefik_enable_security_headers: true     # включено по умолчанию
+# traefik_enable_rate_limit: false          # выключено по умолчанию
+traefik_enable_rate_limit: true
+traefik_rate_limit_average: 200
+traefik_rate_limit_burst: 100
+traefik_rate_limit_period: "2s"
+# traefik_enable_dashboard_basic_auth: true  # включено по умолчанию
+# Пароль dashboard (из vault; при пустом — автогенерация на хосте):
+# traefik_dashboard_admin_password: "{{ vault_dashboard_password }}"
+
+# Цепочка middleware для всех веб-роутеров (дефолтный chain "web-chain"
+# включает security-headers + rate-limit). При использовании:
+#   middlewares: ["web-chain@file"]       # в file-provider router
+#   аннотация auses: ...router.middlewares: web-chain@file
+
+# ---- Динамическая конфигурация (File Provider) -----------------------------
+traefik_dynamic_configs:
+  - name: tls-options
+    content:
+      tls:
+        options:
+          default:
+            minVersion: VersionTLS12
+            sniStrict: false
+            cipherSuites:
+              - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+              - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+              - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+              - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+            curvePreferences:
+              - CurveP521
+              - CurveP384
+
+# ---- ACME (если всё же нужен Let's Encrypt) --------------------------------
+# traefik_enable_acme: true
+# traefik_cert_resolvers:
+#   letsencrypt:
+#     acme:
+#       email: ops@example.com
+#       storage: "{{ traefik_data_dir }}/acme.json"
+#       httpChallenge:
+#         entryPoint: web
+
+# ---- Дашборд ---------------------------------------------------------------
+traefik_dashboard_enabled: true
+traefik_dashboard_host: "traefik-dash.example.com"
+# При traefik_enable_dashboard_basic_auth: true (по умолчанию)
+# traefik_dashboard_middlewares автоматически включает ["dashboard-auth"].
+# Для дополнительной защиты по IP:
+# traefik_dashboard_trusted_ips:
+#   - "10.0.0.0/8"
+#   - "127.0.0.1/32"
