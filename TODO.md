@@ -37,7 +37,7 @@
       `kubeconfig` (см. `THINKING.md`, раздел 10).
 - [x] Применение `traefik_extra_unit_vars` в шаблоне `traefik.service.j2`.
 - [x] Поддержка Docker/Kubernetes provider'ов — через документированные примеры merge в `traefik_static_config` (`docs/examples/`).
-- [x] Установка плагинов Traefik v3 (pilot + experimental.plugins + предзагрузка `traefik trial --download`).
+- [x] Плагины Traefik v3: `traefik_plugins` → `experimental.plugins` (без pilot — daemon сам качает на старте; pilot/trial оставлен как v2-era предзагрузка), плюс `traefik_dynamic_configs_extra`.
 - [x] Logrotate с SIGUSR1 без перезапуска сервиса.
 - [x] Molecule-сценарий на RockyLinux 9.
 - [x] Перевод документации (README/CHANGELOG/TODO/AGENTS/THINKING) на русский язык.

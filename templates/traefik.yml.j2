@@ -1,7 +1,8 @@
 {#- Static Traefik v3 configuration. Declarative: the traefik_static_config
     dictionary is merged with computed blocks (certificatesResolvers from
-    traefik_cert_resolvers / traefik_enable_acme, pilot/experimental.plugins
-    from traefik_pilot_enabled / traefik_plugins, kubernetes providers from
+    traefik_cert_resolvers / traefik_enable_acme, experimental.plugins from
+    traefik_plugins, optional pilot block from traefik_pilot_enabled
+    (v2-era path, unused on Traefik v3), kubernetes providers from
     traefik_kubernetes_*) and dumped via
     to_nice_yaml(indent=2), so overrides from inventory/group_vars behave
     predictably (dict merge/replace). -#}
@@ -38,10 +39,20 @@
 {% set _ws_tls_cr = _resolver_names[0] if (_resolver_names | length > 0) else '' -%}
 {% set _existing_cr = traefik_static_config.get('entryPoints', {}).get('websecure', {}).get('http', {}).get('tls', {}).get('certResolver', '') -%}
 {% set _ws_tls_extra = {'certResolver': _ws_tls_cr} if (_ws_tls_cr | length > 0 and _existing_cr | length == 0) else {} -%}
-{% set _plugins_dict = {} -%}
+{% set _plugins_ns = namespace(d={}) -%}
 {% for _p in traefik_plugins -%}
-{% set _plugins_dict = _plugins_dict | combine({ _p.name: {'moduleName': _p.moduleName, 'version': _p.version} }) -%}
+{% set _plugins_ns.d = _plugins_ns.d | combine({ _p.name: {'moduleName': _p.moduleName, 'version': _p.version} }) -%}
 {% endfor -%}
+{% set _plugins_dict = _plugins_ns.d -%}
+{#- WHY namespace(): a plain `{% set %}` inside `{% for %}` lives in the loop
+    iteration scope and is discarded when the iteration ends, so the naive
+    accumulator silently rendered `experimental.plugins: {}` (verified with an
+    in-memory render). Traefik's paerser (parser/nodes_metadata.go) rejects
+    empty nodes whose type has no allowEmpty flag with exactly the startup
+    error we saw: "plugins cannot be a standalone element (type
+    map[string]plugins.Descriptor)". namespace() is the standard Jinja
+    cross-loop mutation mechanism; `_plugins_dict` below is only used when
+    non-empty (see the length guard at the experimental combine). -#}
 {#- Observability blocks (prometheus/ping/serversTransport/hostResolver/tracing).
     Each is emitted only when its switch/dict is non-empty; they merge into the
     static config via combine() like resolvers/pilot do. `ping` is deliberately
@@ -71,11 +82,13 @@
 {% if (traefik_prometheus_enabled | bool) and (_ep_name not in (traefik_static_config.get('entryPoints', {}) | default({}, true))) -%}
 {% set _extra_ep = {_ep_name: {'address': ':8082'}} -%}
 {% endif -%}
-{#- Pilot & plugins: the `pilot` static block is what makes the daemon fetch /
-    refresh Yaegi plugin sources from pilot.traefik.io at startup; every plugin
-    used by a middleware MUST also be declared under `experimental.plugins`.
-    The token is rendered into the config file (mode 0640, service owner) and
-    consumed by both the daemon and the `traefik trial --download` pre-fetch. -#}
+{#- Plugins: every plugin used by a middleware MUST be declared under
+    `experimental.plugins` — on Traefik v3 that declaration ALONE is enough:
+    the daemon downloads the module from the plugin catalog (GitHub) at
+    startup, no pilot/trial involved (pilot was removed in v3). The optional
+    `pilot` block below (traefik_pilot_enabled + token) is a v2-era path kept
+    for back-compat: it pre-fetches sources via `traefik trial --download`
+    into traefik_plugins_dir so a catalog outage never blocks startup. -#}
 {% set _pilot_block = {'token': traefik_pilot_token} | combine(traefik_pilot_extra_props) -%}
 {#- Kubernetes providers: one shared connection block + per-provider extras
     (options are provider-specific — Traefik's strict parser rejects, say,
@@ -111,7 +124,7 @@
                  | combine({'pilot': _pilot_block}
                            if (traefik_pilot_enabled | bool and traefik_pilot_token | length > 0) else {})
                  | combine({'experimental': {'plugins': _plugins_dict}}
-                           if (traefik_pilot_enabled | bool and traefik_plugins | length > 0) else {})
+                           if (_plugins_dict | length > 0) else {}, recursive=True)
                  | combine({'certificatesResolvers': _resolvers}
                            if (_resolvers | length > 0) else {})
                  | combine({'entryPoints': _extra_ep} if (_extra_ep | length > 0) else {}, recursive=True)

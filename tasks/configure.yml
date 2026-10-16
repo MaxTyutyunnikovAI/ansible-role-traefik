@@ -22,7 +22,7 @@
   # The rendered config can contain the pilot TRIAL token or the Kubernetes
   # bearer token (providers.*.token) — censor the task while either is set.
   no_log: "{{ (traefik_pilot_token | length > 0)
-              or (traefik_kubernetes_token | length > 0) }}"
+    or (traefik_kubernetes_token | length > 0) }}"
   notify: validate_and_restart_traefik
 
 # --- Environment file with secrets (systemd EnvironmentFile) ----------------
@@ -68,9 +68,9 @@
     argv:
       - "{{ traefik_bin_dir }}/traefik"
       - trial
-      - "--setup={{ traefik_pilot_token }}"     # TRIAL- token, keep it in ansible-vault
+      - "--setup={{ traefik_pilot_token }}" # TRIAL- token, keep it in ansible-vault
       - "--download={{ item.name }}@{{ item.version }}"
-    chdir: "{{ traefik_config_dir }}"           # pilot writes ./pilot.yml next to CWD
+    chdir: "{{ traefik_config_dir }}" # pilot writes ./pilot.yml next to CWD
     # `creates` must live INSIDE the module options — as a top-level task key
     # it collides with the `ansible.builtin.command` action and Ansible aborts
     # with "ERROR! conflicting action statements: ansible.builtin.command, creates".
@@ -78,16 +78,17 @@
   loop: "{{ traefik_plugins }}"
   loop_control:
     label: "{{ item.name }}@{{ item.version }}"
-  no_log: true                                  # the token appears in argv
-  changed_when: true                            # "skipped (creates)" stays quiet; real fetch = change
+  no_log: true # the token appears in argv
+  changed_when: true # "skipped (creates)" stays quiet; real fetch = change
   when:
     - traefik_pilot_enabled | bool
     - traefik_plugins | length > 0
-    - not ansible_check_mode                    # the binary may not exist yet in check mode
+    - not ansible_check_mode # the binary may not exist yet in check mode
 
 # --- Dynamic configuration generation (File Provider) ------------------------
 # Declarative source of truth for conf.d/*.yml:
 #   * traefik_dynamic_configs          — list of {name, content} items, one file each;
+#   * traefik_dynamic_configs_extra    — appended to the same list (playbook scope);
 #   * traefik_dynamic_configs_template — optional single Jinja2 template rendered into
 #     <traefik_dynamic_config_dir>/<traefik_dynamic_configs_template_name>.yml. The
 #     template has access to every role variable and to `traefik_dynamic_configs`, so
@@ -101,7 +102,10 @@
     owner: "{{ traefik_config_owner }}"
     group: "{{ traefik_config_group }}"
     mode: "{{ traefik_config_mode }}"
-  loop: "{{ traefik_dynamic_configs }}"
+  # traefik_dynamic_configs_extra is APPENDED (not merged): both lists share
+  # the {name, content} shape, and a playbook override of the default list must
+  # not silently drop the role's built-in tls-options item.
+  loop: "{{ traefik_dynamic_configs + traefik_dynamic_configs_extra }}"
   loop_control:
     label: "{{ traefik_dynamic_config_dir }}/{{ item.name }}{{ traefik_dynamic_configs_file_extension }}"
   notify: validate_and_restart_traefik
@@ -128,12 +132,26 @@
   notify: validate_and_restart_traefik
 
 # --- PRESET MIDDLEWARES (00-default-middlewares.yml) ------------------------
-# htpasswd file for dashboard auth (usersFile mode, when no inline users given)
-- name: Generate dashboard htpasswd from vault-provided password
+# Dashboard basic-auth: единственный режим — usersFile (хеши живут в отдельном
+# файле 0640, а не в динамической конфигурации). Пароль обязателен при
+# включённой авторизации; inline-пользователи и автогенерация удалены.
+- name: Assert dashboard password is set when basic auth is enabled
+  ansible.builtin.assert:
+    that:
+      - traefik_dashboard_password | length > 0
+    fail_msg: >-
+      traefik_dashboard_auth_enabled=true требует traefik_dashboard_password
+      (задайте из vault). Автогенерация пароля и inline-пользователи
+      (traefik_dashboard_users) удалены — см. CHANGELOG роли.
+  when:
+    - traefik_dashboard_enabled | bool
+    - traefik_dashboard_auth_enabled | bool
+
+- name: Generate dashboard htpasswd (usersFile mode)
   community.general.htpasswd:
-    name: "{{ traefik_dashboard_admin_user }}"
-    password: "{{ traefik_dashboard_admin_password }}"
-    path: "{{ traefik_dashboard_htpasswd_file }}"
+    name: "{{ traefik_dashboard_user }}"
+    password: "{{ traefik_dashboard_password }}"
+    path: "{{ traefik_dashboard_auth_file }}"
     crypt_scheme: apr_md5_crypt
     owner: "{{ traefik_config_owner }}"
     group: "{{ traefik_config_group }}"
@@ -141,60 +159,22 @@
   no_log: true
   notify: validate_and_restart_traefik
   when:
-    - traefik_enable_dashboard_basic_auth | bool
-    - traefik_dashboard_basic_auth | length == 0
-    - traefik_dashboard_admin_password | length > 0
+    - traefik_dashboard_enabled | bool
+    - traefik_dashboard_auth_enabled | bool
 
-- name: Auto-generate dashboard htpasswd and admin password file
-  when:
-    - traefik_enable_dashboard_basic_auth | bool
-    - traefik_dashboard_basic_auth | length == 0
-    - traefik_dashboard_admin_password | length == 0
-  block:
-    - name: Stat existing dashboard auth files
-      ansible.builtin.stat:
-        path: "{{ item }}"
-      loop:
-        - "{{ traefik_dashboard_password_file }}"
-        - "{{ traefik_dashboard_htpasswd_file }}"
-      register: _dash_auth_stat
-
-    - name: Read existing dashboard admin password
-      ansible.builtin.slurp:
-        src: "{{ traefik_dashboard_password_file }}"
-      register: _dash_pass_slurp
-      no_log: true
-      when: _dash_auth_stat.results[0].stat.exists | default(false)
-
-    - name: Set dashboard admin password fact (existing or new random)
-      ansible.builtin.set_fact:
-        _dash_admin_pass: >-
-          {{ (_dash_pass_slurp.content | b64decode).strip()
-             if (_dash_pass_slurp is defined and _dash_pass_slurp.content is defined
-                 and (_dash_pass_slurp.content | b64decode).strip() | length > 0)
-             else lookup('password', '/dev/null chars=ascii_letters,digits length=24') }}
-      no_log: true
-
-    - name: Write dashboard admin password to a root-only file
-      ansible.builtin.copy:
-        content: "{{ _dash_admin_pass }}\n"
-        dest: "{{ traefik_dashboard_password_file }}"
-        owner: root
-        group: root
-        mode: "0600"
-      no_log: true
-
-    - name: Create/update dashboard htpasswd from generated password
-      community.general.htpasswd:
-        name: "{{ traefik_dashboard_admin_user }}"
-        password: "{{ _dash_admin_pass }}"
-        path: "{{ traefik_dashboard_htpasswd_file }}"
-        crypt_scheme: apr_md5_crypt
-        owner: "{{ traefik_config_owner }}"
-        group: "{{ traefik_config_group }}"
-        mode: "0640"
-      no_log: true
-      notify: validate_and_restart_traefik
+# Гигиена: файлы, оставшиеся от удалённых режимов (inline не оставляет файлов,
+# автогенерация писала dashboard-admin-password) и htpasswd при выключенной
+# авторизации должны исчезать — state=absent идемпотентен, notify срабатывает
+# только при реальном удалении.
+- name: Remove obsolete dashboard auth files when auth is disabled
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ traefik_dashboard_auth_file }}"
+    - "{{ traefik_config_dir }}/dashboard-admin-password"
+  when: not (traefik_dashboard_enabled | bool and traefik_dashboard_auth_enabled | bool)
+  notify: validate_and_restart_traefik
 
 # Render the 00-default-middlewares.yml file based on enabled presets.
 - name: Render default middlewares file (presets and chain)
@@ -216,13 +196,9 @@
                                        'period': traefik_rate_limit_period}}}
          if (traefik_enable_rate_limit | bool) else {} }}
     _dash_auth_mw: >-
-      {{ {'dashboard-auth': {'basicAuth': {'users': traefik_dashboard_basic_auth,
-                                            'realm': 'Traefik'}}}
-         if (traefik_enable_dashboard_basic_auth | bool
-             and (traefik_dashboard_basic_auth | length > 0))
-         else {'dashboard-auth': {'basicAuth': {'usersFile': traefik_dashboard_htpasswd_file,
-                                                  'realm': 'Traefik'}}}
-         if (traefik_enable_dashboard_basic_auth | bool)
+      {{ {'dashboard-auth': {'basicAuth': {'usersFile': traefik_dashboard_auth_file,
+                                           'realm': 'Traefik'}}}
+         if (traefik_dashboard_enabled | bool and traefik_dashboard_auth_enabled | bool)
          else {} }}
     _chain_items: >-
       {{ (['security-headers'] if (traefik_enable_security_headers | bool) else [])
@@ -240,7 +216,7 @@
     (traefik_default_middlewares_enabled | bool)
     or (traefik_enable_security_headers | bool)
     or (traefik_enable_rate_limit | bool)
-    or (traefik_enable_dashboard_basic_auth | bool)
+    or (traefik_dashboard_enabled | bool and traefik_dashboard_auth_enabled | bool)
   notify: validate_and_restart_traefik
 
 # Dashboard router (File Provider dynamic config). Needed because the role's
@@ -274,7 +250,7 @@
     not (traefik_default_middlewares_enabled | bool)
     and not (traefik_enable_security_headers | bool)
     and not (traefik_enable_rate_limit | bool)
-    and not (traefik_enable_dashboard_basic_auth | bool)
+    and not (traefik_dashboard_enabled | bool and traefik_dashboard_auth_enabled | bool)
   notify: validate_and_restart_traefik
 
 # --- Default TLS certificate from file (cert-manager helper, no-k8s variant) ---
@@ -294,7 +270,6 @@
     state: absent
   when: traefik_default_certificate | length == 0
   notify: validate_and_restart_traefik
-
 # NOTE ON DYNAMIC CONFIG VALIDATION (verified empirically with Traefik v3):
 # dynamic File Provider resources are loaded at runtime (providers.file.watch
 # applies them without a restart), and TLS options are resolved only during an

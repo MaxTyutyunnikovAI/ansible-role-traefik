@@ -56,17 +56,49 @@
   поэтому старые var'ы работают без правок; при задании обоих приоритет у
   `traefik_dashboard_basic_auth`. В middleware `dashboard-auth` добавлен
   `realm: Traefik` (паритет с traefik2 — окно авторизации подписано «Traefik»).
+- **`traefik_dynamic_configs_extra`**: дополнительный список items формата
+  `{name, content}` в стиле `traefik_dynamic_configs`, который **дополняет**
+  (не замещает) базовый список в общем цикле `configure.yml`. Позволяет
+  плейбуку добавлять свои dynamic-файлы (middleware, роутеры), не копируя
+  встроенный item `tls-options` из defaults.
 
 ### Изменено
-- `traefik_enable_security_headers` и `traefik_enable_dashboard_basic_auth`
+- **`experimental.plugins` не зависит от pilot**: шаблон статики рендерит
+  блок по факту непустого `_plugins_dict` (определяется из `traefik_plugins`;
+  раньше требовался ещё и `traefik_pilot_enabled`). На Traefik v3 пилот/trial
+  удалены —
+  daemon сам скачивает модуль из каталога на старте, поэтому декларация
+  в `traefik_plugins` теперь самодостаточна; `pilot:`-блок и задача
+  `traefik trial --download` остались v2-путём (guard `traefik_pilot_enabled`).
+  Merge блока стал `recursive=True`, чтобы чужие ключи `experimental`
+  из `traefik_static_config` не затирались.
+- **Basic-auth дашборда упорядочен: один режим, 4 переменных** (вместо трёх
+  режимов и семи переменных). Переименования:
+
+  | Было | Стало |
+  |---|---|
+  | `traefik_enable_dashboard_basic_auth` | `traefik_dashboard_auth_enabled` |
+  | `traefik_dashboard_admin_user` | `traefik_dashboard_user` |
+  | `traefik_dashboard_admin_password` | `traefik_dashboard_password` |
+  | `traefik_dashboard_htpasswd_file` | `traefik_dashboard_auth_file` |
+
+  Поведение: пароль из vault → htpasswd (`apr_md5_crypt`, 0640) → рендер
+  `usersFile` в `dashboard-auth`; пароль **обязателен** при
+  `traefik_dashboard_auth_enabled: true` (новый `assert` с подсказкой).
+  Middleware `dashboard-auth` и htpasswd-файл создаются только вместе с
+  `traefik_dashboard_enabled` (роутер и его авторизация неразделимы);
+  при выключении файлы `dashboard-htpasswd`/`dashboard-admin-password`
+  удаляются.
+- `traefik_enable_security_headers` и `traefik_dashboard_auth_enabled`
   по умолчанию `true` — при обновлении роли на существующем хосте появится
-  файл `00-default-middlewares.yml` (security-headers + dashboard-auth),
-  и будет сгенерирован пароль для дашборда (сохраняется в
-  `dashboard-admin-password`). Обратная совместимость: при
-  `traefik_default_middlewares_enabled: true` поведение не меняется,
-  legacy-словарь `traefik_default_middlewares` по-прежнему рендерится.
+  файл `00-default-middlewares.yml` (security-headers + dashboard-auth);
+  для дашборда задайте `traefik_dashboard_password` из vault. Обратная
+  совместимость: при `traefik_default_middlewares_enabled: true` поведение
+  не меняется, legacy-словарь `traefik_default_middlewares` по-прежнему
+  рендерится.
 - `traefik_dashboard_middlewares` теперь по умолчанию динамическое —
-  включает `dashboard-auth` при `traefik_enable_dashboard_basic_auth: true`.
+  включает `dashboard-auth` при включённых `traefik_dashboard_enabled` и
+  `traefik_dashboard_auth_enabled`.
 - Из статической конфигурации entry point `websecure` **удалён** `certResolver:
   letsencrypt` в `defaults/main.yml` (и соответствующая копия в `vars/main.yml`).
   Резолвер теперь добавляется шаблоном **только** когда настроен ACME
@@ -74,7 +106,49 @@
   несуществующий резолвер больше не генерируется; Traefik не пишет предупреждение
   и использует встроенный fallback-сертификат.
 
+### Удалено
+- **Inline-пользователи basic-auth**: `traefik_dashboard_users` (алиас traefik2)
+  и `traefik_dashboard_basic_auth` — хеши больше не рендерятся в
+  `00-default-middlewares.yml` (usersFile надёжнее и не хранит секреты в
+  динамической конфигурации). Миграция: задайте `traefik_dashboard_password`.
+- **Автогенерация пароля дашборда**: рандомный пароль и файл
+  `dashboard-admin-password` (root, 0600) больше не создаются; при
+  `auth_enabled` без пароля прогон останавливает `assert`.
+
 ### Исправлено
+- **Пустой `experimental.plugins` при непустом `traefik_plugins`**: накопление
+  словаря плагинов шло через `{% set %}` внутри `{% for %}` — в Jinja2 такая
+  переменная живёт в области видимости итерации и сбрасывается в её конце,
+  поэтому блок рендерился как `plugins: {}`. Traefik (paerser,
+  `parser/nodes_metadata.go`) отвергает пустые узлы без `allowEmpty` при
+  старте: `plugins cannot be a standalone element (type
+  map[string]plugins.Descriptor)` — проба конфигурации в handler'е падала с
+  откатом. Фикс: накопление через `namespace()` + условие рендера по
+  `_plugins_dict | length > 0` (пустой блок не появляется вовсе).
+- **Права ClusterRole расширены под фактический набор informer'ов Traefik**:
+  добавлены `configmaps` (core), `nodes` (core), `endpointslices`
+  (`discovery.k8s.io`), `middlewaretcps` и `serverstransporttcps`
+  (`traefik.io`). Без них провайдеры спамили `403 cannot list resource`
+  (Traefik v3.7 смотрит EndpointSlices, Nodes и TCP-варианты CRD, которых
+  не было в старом списке; `middlewaretcps`/`serverstransporttcps` при этом
+  обязаны присутствовать в CRD-манифесте — они там есть). Список сверен с
+  официальным `kubernetes-crd-rbac.yml` Traefik v3.7.14 (там также есть
+  `nodes`); `pods` (нужен только для OTel) сознательно не добавлен.
+- **Доставка токена Kubernetes: base64 + завершающий LF**. `kubernetes.core.k8s_info`
+  возвращает `data` Secret **в base64**, а задача записи использовала значение без
+  `b64decode` и добавляла `\n`. В результате Traefik получал либо невалидный заголовок
+  (`net/http: invalid header field value for "Authorization"` — из-за LF), либо (после
+  обрезки LF) base64 вместо JWT → 401. Факт токена теперь
+  `| b64decode | trim`, файлы (рабочий и дамп для vault) записываются без
+  завершающего `\n` (`--token=$(cat file)` тоже сломал бы LF).
+- **Схема RBAC-объектов в `tasks/kubernetes.yml`**: `ClusterRole` и
+  `ClusterRoleBinding` были ошибочно обёрнуты в `spec:` — у этих объектов
+  RBAC-версии `v1` нет поля `spec` (правила, `roleRef` и `subjects` живут на
+  верхнем уровне). API-сервер отрезал `spec` (`fieldValidation=Warn`, warning
+  `unknown field "spec"`), из-за чего ClusterRole создавался пустым
+  (`rules: null`), а создание ClusterRoleBinding падало с 422
+  (`roleRef.kind: Unsupported value: ""`, `roleRef.name: Required value`).
+  Уровень `spec:` убран; `TLSStore` (CRD) оставлен со `spec:` — это корректно.
 - **Цепочка валидации перезаписана под Traefik v3**: офлайн-режима `--check` в v3 не
   существует (без `--configFile` — ошибка `field not found, node: check`; с `--configFile`
   прочие флаги и ENV молча игнорируются, «валидация» фактически запускает полноценный

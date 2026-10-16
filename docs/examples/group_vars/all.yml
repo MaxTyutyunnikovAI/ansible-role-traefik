@@ -57,9 +57,9 @@ traefik_enable_rate_limit: true
 traefik_rate_limit_average: 200
 traefik_rate_limit_burst: 100
 traefik_rate_limit_period: "2s"
-# traefik_enable_dashboard_basic_auth: true  # включено по умолчанию
-# Пароль dashboard (из vault; при пустом — автогенерация на хосте):
-# traefik_dashboard_admin_password: "{{ vault_dashboard_password }}"
+# traefik_dashboard_auth_enabled: true      # включено по умолчанию
+# Пароль dashboard ОБЯЗАТЕЛЕН при auth_enabled (автогенерации нет):
+# traefik_dashboard_password: "{{ vault_dashboard_password }}"
 
 # Цепочка middleware для всех веб-роутеров (дефолтный chain "web-chain"
 # включает security-headers + rate-limit). При использовании:
@@ -97,7 +97,7 @@ traefik_dynamic_configs:
 # ---- Дашборд ---------------------------------------------------------------
 traefik_dashboard_enabled: true
 traefik_dashboard_host: "traefik-dash.example.com"
-# При traefik_enable_dashboard_basic_auth: true (по умолчанию)
+# При traefik_dashboard_enabled и traefik_dashboard_auth_enabled (по умолчанию)
 # traefik_dashboard_middlewares автоматически включает ["dashboard-auth"].
 # Для дополнительной защиты по IP:
 # traefik_dashboard_trusted_ips:

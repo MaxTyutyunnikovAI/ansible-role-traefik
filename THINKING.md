@@ -161,6 +161,10 @@ RBAC настраиваются плейбуком/инвентарём (при�
 playbook-k3s-provider.yml`); роль только рендерит конфиг.
 
 ## 11. Дашборд: алиас `traefik_dashboard_users` вместо переименования
+> **Устарело (см. §21)**: алиасы `traefik_dashboard_users` /
+> `traefik_dashboard_basic_auth` удалены при упорядочивании basicauth.
+> Запись сохранена как история решения.
+>
 - Роль traefik2/rolehippie питает basicAuth дашборда переменной
   `traefik_dashboard_users` (список htpasswd-строк `user:hash`); в traefik3 та же
   семантика называется `traefik_dashboard_basic_auth`. Два имени на одно свойство —
@@ -272,3 +276,208 @@ security-headers по умолчанию, rate-limit опционально. (2)
 (меньше переменных, но сложнее комбинировать с легаси-настройками).
 Жёстко зашитый chain (каждый новый пресет молниеносно применяется ко всем
 роутерам — конфликт с безопасностью).
+
+## 18. Диагностика 422 при создании ClusterRoleBinding: отрезанный `spec`
+**Решение**: в задачах `Create ClusterRole` и `Bind the ClusterRole to the ServiceAccount`
+убран уровень `spec:` — правила (`rules`), `roleRef` и `subjects` размещены на верхнем
+уровне определения, как требует схема RBAC `rbac.authorization.k8s.io/v1`.
+
+**Симптомы**: (1) фатал 422 при создании ClusterRoleBinding —
+`roleRef.kind: Unsupported value: ""`, `roleRef.name: Required value`;
+(2) в логе прогона на задаче ClusterRole — `[WARNING]: unknown field "spec"`;
+(3) после прогона `kubectl get clusterrole traefik-external -o yaml` → `rules: null`
+(роль создана пустой, SA фактически без прав).
+
+**Почему так**: у ClusterRole/ClusterRoleBinding/Role/RoleBinding (и у всего RBAC `v1`)
+нет поля `spec` — в отличие от обычных ресурсов. API-сервер Kubernetes принимает запрос
+с `fieldValidation=Warn`, выдаёт warning `unknown field "spec"` и **отрезает** это поле
+(prune). Для ClusterRole это тихо удаляло `rules` (задача уходила в `changed`); для
+ClusterRoleBinding вместе с `spec` исчезал `roleRef` целиком, и валидация падала на
+пустом `kind`/`name`. Диагностика подтвердила, что порча НЕ в ansible-транспорте/клиенте:
+warning доказывает, что payload дошёл до сервера полным, а статический аудит (YAML-парс,
+код коллекции `kubernetes.core`, сериализация клиента kubernetes 37.0.1) чист.
+
+**Альтернативы (отклонены)**: передавать `resource_definition` строкой YAML (мимо
+словарного транспорта) — избыточно, т.к. механизм установлен; пересоздавать объекты
+руками — не декларативно.
+
+## 19. Токен Kubernetes: b64decode и запрет завершающего LF
+**Решение**: факт токена вычисляется как
+`{{ _token_secret.resources[0].data.token | b64decode | trim }}`; файлы
+(рабочий `k8s-token` и дамп для vault) записываются **без** завершающего `\n`.
+
+**Симптомы** (после починки RBAC, см. §18): в логе Traefik бесконечные
+`reflector.go: Failed to watch ... net/http: invalid header field value for
+"Authorization"` — провайдеры kubernetes не работают.
+
+**Диагностика (улики)**:
+1. `head /etc/traefik/k8s-token` → `ZXlKaGJHY2l...` — это base64 самого JWT:
+   `kubernetes.core.k8s_info` отдаёт `data` Secret без декодирования (как в API),
+   роль же писала значение как есть → Traefik слал бы base64 вместо подписи (401).
+2. `od -An -tx1` последних байтов файла → `... 64 77 3d 3d 0a` = `dw==\n` —
+   завершающий LF из `content: "{{ ... }}\n"` (YAML двойные кавычки → реальный LF).
+3. `curl -H "Authorization: Bearer $(tr -d '\n' < k8s-token)" .../api/v1/namespaces`
+   → 401: подтверждает, что одного обрезания LF недостаточно — нужен и decode.
+4. Сама ошибка «invalid header» — это про LF (client-go отвергает управляющие
+   символы в значении заголовка), она срабатывает раньше любой проверки кредов.
+
+**Почему две ошибки маскировали друг друга**: LF давал симптом сразу (валидация
+заголовка), base64 — только после устранения LF (401). Факт с `b64decode | trim`
+— единственная точка исправления, broadcast/запись/дамп потребляют его уже
+очищенным. Убранное `\n` безопасно: JWT однострочный, а дамп в vault используется
+через `$(cat file)`, где LF тоже сломал бы сценарий.
+
+## 20. Права ClusterRole: минимальный набор = фактический набор watch
+**Решение**: в `_traefik_rbac_base` добавлены пять ресурсов, дававших 403:
+`configmaps` и `nodes` (core), `endpointslices` (`discovery.k8s.io`),
+`middlewaretcps` и `serverstransporttcps` (`traefik.io`).
+
+**Почему именно они**: после починки токена (§19) креды стали валидными, и
+`journalctl -u traefik` выдал полный набор отказов — 41× `cannot list resource`,
+после дедупликации 4 уникальных ресурса; пятый (`nodes`) проявился только
+после того, как первые четыре были выданы и Traefik перезапущен (informer
+узлов, видимо, стартует после успешных остальных). Их отсутствие в правилах —
+рассинхрон между тем, что смотрит Traefik v3.7, и тем, что перечислено в роли:
+
+- Traefik v3.7 (client-go 0.36) использует EndpointSlice вместо простых Endpoints
+  для построения сервисов — права были только на `endpoints`;
+- `configmaps` — informer провайдеров (label-selector `owner!=helm`) смотрит
+  cluster-wide, а не только в ns Traefik;
+- `middlewaretcps`/`serverstransporttcps` — TCP-варианты CRD, которые роль
+  сама не создавала, но они есть в CRD-манифесте `traefik-crd-v3.yml`
+  (10 kind'ов traefik.io) — список прав отставал от манифеста;
+- `nodes` — подтверждено официальным `kubernetes-crd-rbac.yml` Traefik v3.7.14
+  (там nodes входит в базовый core-блок наравне с services/secrets/configmaps).
+
+**Принцип**: источник истины — и фактические запросы informer'ов в логах, и
+официальный upstream-RBAC (сверены, совпали); `pods` из upstream сознательно
+не добавлен (нужен только для OTel-атрибутов), legacy-группа
+`traefik.containo.us` и gateway-права оставлены без изменений (ошибок нет).
+
+## 21. Упорядочивание basic-auth: один режим usersFile, четыре переменные
+**Решение**: откат §11 и упразднение трёх режимов авторизации. Остаются
+`traefik_dashboard_auth_enabled` (бывш. `traefik_enable_dashboard_basic_auth`),
+`traefik_dashboard_user` (бывш. `..._admin_user`), `traefik_dashboard_password`
+(бывш. `..._admin_password`) и internal-путь `traefik_dashboard_auth_file`
+(бывш. `..._htpasswd_file`). Удалены: алиасы `traefik_dashboard_users` /
+`traefik_dashboard_basic_auth` (inline-режим), автогенерация пароля и файл
+`dashboard-admin-password`. Один assert (пароль обязателен при auth_enabled),
+одна задача `htpasswd`, рендер всегда через `usersFile`.
+
+**Почему**:
+1. Три режима (inline / vault / автогенерация) с приоритетами — источник
+   инцидентов: плейбук держал старый inline bcrypt-хеш, пресет с
+   `traefik_dashboard_admin_password` молча игнорировался, и ни один пароль
+   не работал (диагностика: `curl -u admin:admin333` → 401 при живом realm).
+2. Inline-хеши лежали в `00-default-middlewares.yml` — секреты в динамической
+   конфигурации; usersFile (0640) — правильное место.
+3. Автогенерация (рандом + `dashboard-admin-password`) добавляла две задачи,
+   slurp/stat-логику и ещё один файл-состояние; по требованию владельца
+   удалена — пароль всегда явный (vault).
+4. Middleware `dashboard-auth` теперь рендерится только вместе с
+   `traefik_dashboard_enabled`: роутер без авторизации невозможен при
+   auth_enabled, а bare-установка (дашборд выключен) не требует пароля —
+   assert не срабатывает без причины.
+
+**Альтернативы (отклонены)**: deprecated-warn на релиз (дольше жить с двумя
+источниками правды); оставить inline как «продвинутый» режим (возвращает
+приоритеты и инцидент-класс №1); оставить автогенерацию (меньше кода, но
+пароль вне vault и лишний файл-состояние).
+
+## 22. Плагины без pilot и `traefik_dynamic_configs_extra`
+**Решение**: (1) шаблон статики рендерит `experimental.plugins` по одному
+условию `traefik_plugins | length > 0` (раньше — `traefik_pilot_enabled and
+traefik_plugins`), merge — `recursive=True`; (2) новый список
+`traefik_dynamic_configs_extra` дополняет `traefik_dynamic_configs` в том же
+цикле `configure.yml`.
+
+**Почему**:
+1. Pilot/trial — механизм Traefik v2: блок `pilot` и команда `traefik trial`
+   в v3 удалены, а фактическая установка плагина на v3 — одна декларация
+   `experimental.plugins` (daemon сам скачивает модуль из каталога на старте).
+   Прежнее двойное условие делало `traefik_plugins` мёртвой переменной на v3
+   при дефолтном `traefik_pilot_enabled: false` — плейбук не мог включить
+   плагин, не включая несуществующий в v3 пилот (и задачу `trial`, которая
+   на v3 упала бы). Guard задачи предзагрузки и `pilot:`-блок оставлены как
+   v2-обратная совместимость.
+2. `traefik_dynamic_configs_extra` нужен, потому что плейбуковый override
+   `traefik_dynamic_configs` ЗАМЕНЯЕТ весь default-список (priority
+   defaults < play) — плейбук с одним своим item молча выпилил бы встроенный
+   `tls-options` (minVersion/sniStrict/cipherSuites) из дальнейшего рендера.
+   Append-вариант сохраняет и default, и плейбуковый контент.
+3. Контекст применения — перенос `my-robots-txt` (плагин
+   `github.com/solution-libre/traefik-plugin-robots-txt`) с server-ni на
+   server-ru: ссылки `my-robots-txt@file` в IngressRoute при отсутствии
+   определения заставляли Traefik молча отбрасывать роутер целиком
+   (роутер/сервис не появляются в API, ACME не запускается, sniStrict рвёт
+   handshake — «неработающие» whoami и k3s-dashboard).
+
+**Альтернативы (отклонены)**: инъекция `experimental.plugins` вручную в
+`traefik_static_config` плейбука (обходит предназначение переменной
+`traefik_plugins`, сервер-ni-стиль, но плейбуковый merge пришлось бы держать
+синхронно с шаблоном); встроить item `my-robots-txt` в defaults роли
+(проектный контент в role-слой — он по определению env-специфичный);
+`traefik_dynamic_configs_template` под файл роботов (один шаблон на роль —
+тривиально конфликтует с будущими генерациями); пилот(true)+trial (на v3.7
+команды нет — задача упала бы).
+
+## 23. Проба отклонила `plugins`: пустой узел и `{% set %}` в цикле
+
+**Симптом** (прогон `playbooks/server-ru/_traefik.yml`, handler-проба):
+
+```
+command traefik error: plugins cannot be a standalone element
+(type map[string]plugins.Descriptor)
+```
+
+Роль откатила конфиг на `.bak` и упала — сервис остался на прежней
+конфигурации.
+
+**Диагноз** (две независимые проверки):
+
+1. *Источник сообщения* — `traefik/paerser`, `parser/nodes_metadata.go:81`:
+   ```go
+   if len(node.Children) == 0 && tagValue != TagLabelAllowEmpty && tagValue != "-" {
+       return fmt.Errorf("%s cannot be a standalone element (type %s)", node.Name, fType)
+   }
+   ```
+   «standalone» здесь = **пустой узел**: у `plugins` нет детей, а тип
+   `map[string]plugins.Descriptor` не помечен `allowEmpty`. То есть Traefik
+   отклонил не вложенность, а **пустизну** `plugins: {}`.
+2. *Рендер шаблона в памяти* (defaults + vars + role-args плейбука, чистый
+   Jinja2 с `combine`/`to_nice_yaml`): `experimental = {'plugins': {}}` —
+   блок есть, накопление пустое.
+
+**Корень**: в `traefik.yml.j2` accumulator собирался так:
+
+```jinja
+{% set _plugins_dict = {} -%}
+{% for _p in traefik_plugins -%}
+{% set _plugins_dict = _plugins_dict | combine({ _p.name: {...} }) -%}
+{% endfor -%}
+```
+
+В Jinja2 `{% set %}` внутри `{% for %}` создаёт переменную в кадре итерации
+и **сбрасывается в конце каждой итерации** — после цикла внешний
+`_plugins_dict` остаётся `{}` (мини-репро: `{% set d = {} %}{% for k in ['a'] %}{% set d = d|combine({k:1}) %}{% endfor %}{{ d }}` → `{}`).
+Баг латентный: раньше условие `traefik_plugins | length > 0` почти всегда
+было ложным (переменная не задавалась), и мёртвый код не выполнялся.
+Причина, по которой ошибка всплыла именно сейчас: `_traefik.yml` впервые
+передал непустой `traefik_plugins`.
+
+**Фикс**: накопление через `namespace(d={})` (канонический механизм мутации
+за пределами цикла) + условие рендера заменено на
+`_plugins_dict | length > 0` — пустой блок `experimental` не появляется ни
+при каком стечении обстоятельств (защита и от paerser, и от лишнего ключа).
+
+**Проверка**: in-memory рендер →
+`experimental.plugins.robots-txt = {moduleName: github.com/solution-libre/traefik-plugin-robots-txt, version: v0.2.2}`,
+один YAML-документ, корневого `plugins` нет; при `traefik_plugins: []`
+блок `experimental` отсутствует; `to_nice_yaml` парсится обратно.
+
+**Контингент при следующем прогоне**: проба выполняет реальный старт Traefik,
+теперь с загрузкой модуля из каталога (proxy.golang.org / github). Если
+загрузчик не доберётся до сети, в выводе пробы появится строка уровня
+`error` — handler сочтёт конфигурацию сломанной и откатит (правильно:
+без плагина middleware `my-robots-txt` невалиден). Действие при этом —
+отдельная диагностика сети/кэша, а не откат самого фикса.

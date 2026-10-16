@@ -271,23 +271,26 @@ traefik_cert_resolvers: {}
 #         tlsChallenge: {}
 
 # ----------------------------------------------------------------------------
-# TRAEFIK PILOT & PLUGINS (trial mechanism)
-# Traefik v3 plugins are Yaegi scripts fetched at startup by the `traefik trial`
-# command from pilot.traefik.io — there is no offline "install" step, so plugin
-# installation = (1) enabling pilot in the static config, (2) running
-# `traefik trial --download <name>@<version>` to pre-fetch sources into
-# traefik_plugins_dir, (3) declaring each plugin under `experimental.plugins`
-# so the daemon loads the cached copy on every start.
-# The TRIAL token IS rendered into the static config file (templates/
-# traefik.yml.j2, pilot.token): with --configFile the daemon ignores env vars,
-# so traefik_envs would NOT reach it. Protect it with the config file mode
-# (0640, service owner) and keep the value in ansible-vault; the template task
-# sets no_log while a token is defined.
+# PLUGINS (Traefik v3) & PILOT (v2-era trial mechanism)
+# On Traefik v3 declaring a plugin under `experimental.plugins` (via
+# traefik_plugins) is ENOUGH: the daemon downloads the module from the plugin
+# catalog (GitHub) at startup — no pilot, no install step, no offline cache.
+# The pilot/trial path below is kept for Traefik v2 back-compat: it pre-fetches
+# sources into traefik_plugins_dir with `traefik trial --download
+# <name>@<version>` so a catalog outage never blocks startup, and it renders
+# the `pilot` block (token) into the static config (templates/traefik.yml.j2,
+# pilot.token): with --configFile the daemon ignores env vars, so traefik_envs
+# would NOT reach it. Protect the token with the config file mode (0640,
+# service owner) and keep the value in ansible-vault; the template task sets
+# no_log while a token is defined. On Traefik v3 keep traefik_pilot_enabled:
+# false — the `pilot` static block and the `traefik trial` command no longer
+# exist there.
 # ----------------------------------------------------------------------------
-traefik_pilot_enabled: false                   # true -> pilot block + plugins dir + ReadWritePaths
+traefik_pilot_enabled: false                   # true -> pilot block + plugins dir + ReadWritePaths (Traefik v2 only)
 traefik_pilot_token: ""                        # TRIAL token (pilot.traefik.io); keep it in ansible-vault
 traefik_pilot_extra_props: {}                  # e.g. {onerror: ignore} — unknown modules won't stop startup
 # Plugins to install: [{name, version, moduleName}] — name usually "<author><plugin>".
+# Rendered into experimental.plugins; on Traefik v3 the daemon fetches them at startup.
 traefik_plugins: []
 # Example:
 #   traefik_plugins:
@@ -325,6 +328,15 @@ traefik_dynamic_configs:
   #       routers: ...
 
 # ----------------------------------------------------------------------------
+# EXTRA DYNAMIC CONFIGURATION (File Provider). Same {name, content} item shape
+# as traefik_dynamic_configs, but appended to the same render loop in
+# configure.yml instead of overriding the default list — set it from a playbook
+# to add project-specific files (middlewares, routers) WITHOUT copying the
+# built-in tls-options item out of the defaults.
+# ----------------------------------------------------------------------------
+traefik_dynamic_configs_extra: []
+
+# ----------------------------------------------------------------------------
 # DYNAMIC CONFIGURATION — TEMPLATE-BASED GENERATION (optional)
 # Path to a custom Jinja2 template rendered into ONE extra dynamic-config file
 # in traefik_dynamic_config_dir. Use it when the declarative list is not enough:
@@ -346,12 +358,6 @@ traefik_dynamic_configs_file_extension: ".yml"          # File Provider watches 
 # ----------------------------------------------------------------------------
 traefik_default_middlewares_enabled: false
 traefik_hsts_max_age: 31536000                 # 1 year
-# Dashboard basic-auth users (htpasswd entries, e.g. ["admin:$2b$12$..."]).
-# traefik_dashboard_users is a compatibility alias with the traefik2 /
-# rolehippie.traefik role — same format, same meaning. If both are set,
-# traefik_dashboard_basic_auth wins (regular var precedence).
-traefik_dashboard_users: []
-traefik_dashboard_basic_auth: "{{ traefik_dashboard_users }}"
 traefik_default_middlewares:
   security-headers:
     headers:
@@ -373,15 +379,15 @@ traefik_default_middlewares:
 # When traefik_dashboard_enabled is true the role renders conf.d/05-dashboard.yml
 # exposing the API dashboard on the api entrypoint. With `api.insecure: false`
 # (the default) the dashboard is ONLY reachable through this router, so you can
-# protect it with basicAuth (traefik_dashboard_basic_auth -> the "dashboard-auth"
-# middleware in 00-default-middlewares.yml) and/or extra middlewares such as
-# ipAllowList. Set traefik_dashboard_entrypoint to an existing entryPoint name
-# (default: websecure).
+# protect it with basicAuth (traefik_dashboard_auth_enabled / _password -> the
+# "dashboard-auth" middleware in 00-default-middlewares.yml) and/or extra
+# middlewares such as ipAllowList. Set traefik_dashboard_entrypoint to an
+# existing entryPoint name (default: websecure).
 # ----------------------------------------------------------------------------
 traefik_dashboard_enabled: false
 traefik_dashboard_entrypoint: "websecure"
 traefik_dashboard_rule: "Host(`{{ traefik_dashboard_host | default('traefik.' + (ansible_facts['domain'] | default('localhost'))) }}`)"
-traefik_dashboard_middlewares: "{{ ['dashboard-auth'] if traefik_enable_dashboard_basic_auth else [] }}"
+traefik_dashboard_middlewares: "{{ ['dashboard-auth'] if (traefik_dashboard_enabled | bool and traefik_dashboard_auth_enabled | bool) else [] }}"
 # Named IP allow-list middleware rendered together with the dashboard file:
 traefik_dashboard_trusted_ips: []              # e.g. ["10.0.0.0/8", "127.0.0.1/32"]
 
@@ -446,9 +452,11 @@ traefik_enable_rate_limit: false
 traefik_rate_limit_average: 100
 traefik_rate_limit_burst: 50
 traefik_rate_limit_period: "1s"
-traefik_enable_dashboard_basic_auth: true
-traefik_dashboard_admin_user: "admin"
-traefik_dashboard_admin_password: ""              # vault; empty = auto-generate
-traefik_dashboard_htpasswd_file: "{{ traefik_config_dir }}/dashboard-htpasswd"
-traefik_dashboard_password_file: "{{ traefik_config_dir }}/dashboard-admin-password"
+# Dashboard basic-auth: единственный режим — usersFile (хеши не хранятся в
+# динамической конфигурации). Пароль обязателен при включённой авторизации
+# (assert в configure.yml); автогенерация удалена.
+traefik_dashboard_auth_enabled: true
+traefik_dashboard_user: "admin"
+traefik_dashboard_password: ""                  # из vault; обязателен при auth_enabled
+traefik_dashboard_auth_file: "{{ traefik_config_dir }}/dashboard-htpasswd"  # internal
 traefik_middlewares_chain_name: "web-chain"

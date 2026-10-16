@@ -42,6 +42,10 @@ provisioner:
     group_vars:
       traefik_servers:
         traefik_version: v3.7.14
+        # Dashboard + basic-auth: пароль обязателен при auth_enabled (assert);
+        # автогенерация удалена — verify проверяет htpasswd и usersFile-рендер.
+        traefik_dashboard_enabled: true
+        traefik_dashboard_password: "molecule-pass-1"
         traefik_static_config:
           entryPoints:
             web:

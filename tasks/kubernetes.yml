@@ -63,9 +63,14 @@
       - apiGroups: ["networking.k8s.io"]
         resources: ["ingresses/status"]
         verbs: ["get", "list", "watch", "update"]
-      # Services, Endpoints, Namespaces, Secrets (k8s provider lookups)
+      # Services, Endpoints, Namespaces, Secrets, ConfigMaps, Nodes (k8s
+      # provider lookups; nodes — по upstream RBAC Traefik v3.7)
       - apiGroups: [""]
-        resources: ["services", "endpoints", "namespaces", "secrets"]
+        resources: ["services", "endpoints", "namespaces", "secrets", "configmaps", "nodes"]
+        verbs: ["get", "list", "watch"]
+      # EndpointSlices — client-go смотрит их вместо/вместе с Endpoints
+      - apiGroups: ["discovery.k8s.io"]
+        resources: ["endpointslices"]
         verbs: ["get", "list", "watch"]
       # Traefik CRD (traefik.io)
       - apiGroups: ["traefik.io"]
@@ -74,10 +79,12 @@
           - "ingressroutetcps"
           - "ingressrouteudps"
           - "middlewares"
+          - "middlewaretcps"
           - "tlsoptions"
           - "tlsstores"
           - "traefikservices"
           - "serverstransports"
+          - "serverstransporttcps"
         verbs: ["get", "list", "watch"]
       # Traefik CRD (legacy traefik.containo.us)
       - apiGroups: ["traefik.containo.us"]
@@ -118,8 +125,7 @@
       kind: ClusterRole
       metadata:
         name: "{{ traefik_kubernetes_rbac_cluster_role_name }}"
-      spec:
-        rules: "{{ _traefik_rbac_default_rules }}"
+      rules: "{{ _traefik_rbac_default_rules }}"
     state: present
   run_once: true
 
@@ -134,16 +140,15 @@
       kind: ClusterRoleBinding
       metadata:
         name: "{{ traefik_kubernetes_rbac_binding_name }}"
-      spec:
-        roleRef:
-          apiGroup: rbac.authorization.k8s.io
-          kind: ClusterRole
-          name: "{{ traefik_kubernetes_rbac_cluster_role_name }}"
-        subjects:
-          - apiGroup: ""
-            kind: ServiceAccount
-            name: "{{ traefik_kubernetes_rbac_sa_name }}"
-            namespace: "{{ traefik_kubernetes_rbac_namespace }}"
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: "{{ traefik_kubernetes_rbac_cluster_role_name }}"
+      subjects:
+        - apiGroup: ""
+          kind: ServiceAccount
+          name: "{{ traefik_kubernetes_rbac_sa_name }}"
+          namespace: "{{ traefik_kubernetes_rbac_namespace }}"
     state: present
   run_once: true
 
@@ -185,7 +190,10 @@
 
 - name: Store token as a fact for cross-host broadcasting
   ansible.builtin.set_fact:
-    _traefik_k8s_token: "{{ _token_secret.resources[0].data.token }}"
+    # k8s_info отдаёт data.* в base64 — декодируем и срезаем пробельные
+    # символы: иначе в файл попадёт base64 (401) и/или LF (client-go:
+    # "invalid header field value for Authorization").
+    _traefik_k8s_token: "{{ _token_secret.resources[0].data.token | b64decode | trim }}"
   no_log: true
   run_once: true
 
@@ -198,7 +206,9 @@
 
 - name: Write kubernetes token file (path-based, Traefik v3.7+)
   ansible.builtin.copy:
-    content: "{{ _traefik_k8s_token }}\n"
+    # Без завершающего \n: Traefik читает файл целиком и подставляет в
+    # заголовок Authorization — служебные символы там недопустимы.
+    content: "{{ _traefik_k8s_token }}"
     dest: "{{ traefik_k8s_token_file }}"
     owner: "{{ traefik_config_owner }}"
     group: "{{ traefik_config_group }}"
@@ -291,7 +301,9 @@
 # ---------------------------------------------------------------------------
 - name: Dump kubernetes token to the controller (for vault)
   ansible.builtin.copy:
-    content: "{{ _traefik_k8s_token }}\n"
+    # Без завершающего \n: файл предназначен для `--token=$(cat ...)` —
+    # тот же LF сломал бы и этот сценарий.
+    content: "{{ _traefik_k8s_token }}"
     dest: "{{ traefik_k8s_dump_token_path }}"
     owner: "{{ lookup('env', 'USER') | default('root') }}"
     mode: "0600"

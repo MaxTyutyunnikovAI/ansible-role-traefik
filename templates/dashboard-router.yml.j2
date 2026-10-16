@@ -2,8 +2,8 @@
 # Source: traefik_dashboard_* variables — exposes the API dashboard through a
 # named router on an existing entryPoint (required when api.insecure=false).
 # Optional protections: `dashboard-auth` basicAuth middleware (rendered into
-# 00-default-middlewares.yml from traefik_dashboard_basic_auth) and the
-# "internal" ipAllowList middleware built from traefik_dashboard_trusted_ips.
+# 00-default-middlewares.yml from traefik_dashboard_auth_enabled/_password) and
+# the "internal" ipAllowList middleware built from traefik_dashboard_trusted_ips.
 http:
 {% if traefik_dashboard_trusted_ips | length > 0 %}
   middlewares:

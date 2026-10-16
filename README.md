@@ -9,7 +9,8 @@ Ansible-роль для установки Traefik v3 в качестве system
 * Установка бинарного файла Traefik нужной версии идемпотентно: загрузка архива происходит только при отсутствии бинарника или изменении `traefik_version`.
 * Создание системных группы и пользователя `traefik`, каталогов `/etc/traefik`, `/var/log/traefik`, `/var/lib/traefik`.
 * Декларативная статическая конфигурация (`traefik_static_config` → YAML через `to_nice_yaml`).
-* Динамическая конфигурация через File Provider (`traefik_dynamic_configs` → отдельные файлы в `conf.d/` с `watch: true`).
+* Динамическая конфигурация через File Provider (`traefik_dynamic_configs` → отдельные файлы в `conf.d/` с `watch: true`; `traefik_dynamic_configs_extra` — append из плейбука).
+* Плагины Traefik v3 без пилота: `traefik_plugins` → `experimental.plugins`, daemon сам скачивает модуль из каталога на старте (pilot/trial — v2-era путь, отключён по умолчанию).
 * Подключение к Kubernetes/k3s: первоклассенные переменные `traefik_kubernetes_*` включают `kubernetesIngress`, `kubernetesCRD` и `kubernetesGateway` (endpoint + SA-токен + CA; в статике Traefik v3 нет поля `kubeconfig`).
 * Закалённый (hardened) systemd-юнит: `NoNewPrivileges`, `ProtectSystem`, `PrivateTmp`, `CAP_NET_BIND_SERVICE` и т.д.
 * Перезапуск сервиса **только после** успешной проверки новой конфигурации тайм-аутным пробным запуском (обработчик-цепочка `validate_and_restart_traefik`): конфигурация парсится, демоны переживают >= N секунд и не пишут ошибок → старт; иначе — откат на `traefik.yml.bak` и прерывание плейбока. «битая» конфигурация никогда не поднимет сервис (у Traefik v3 нет офлайн-режима `--check`, см. `THINKING.md`).
@@ -68,11 +69,13 @@ traefik_limit_nofile: 1048576
 traefik_extra_capabilities: []        # например ["CAP_NET_RAW"]
 traefik_extra_unit_vars: {}           # произвольные дополнительные ключи [Service]
 
-# Плагины Traefik v3 (trial-механизм + Traefik Pilot)
-traefik_pilot_enabled: false          # true -> блоки pilot/experimental.plugins + кэш плагинов
+# Плагины Traefik v3 (experimental.plugins) и Pilot (v2-era)
+# На Traefik v3 достаточно traefik_plugins: daemon сам скачивает модуль из
+# каталога на старте; pilot/trial в v3 удалены — оставляйте pilot_enabled: false.
+traefik_pilot_enabled: false          # true (Traefik v2) -> блок pilot + предзагрузка trial + кэш плагинов
 traefik_pilot_token: ""               # TRIAL-токен с pilot.traefik.io (хранить в ansible-vault)
-traefik_plugins: []                   # [{name, version, moduleName}] — предзагрузка `traefik trial --download`
-traefik_plugins_dir: "/etc/traefik/plugins-trial"   # кэш исходников Yaegi-плагинов
+traefik_plugins: []                   # [{name, version, moduleName}] -> experimental.plugins (на v3 daemon качает сам)
+traefik_plugins_dir: "/etc/traefik/plugins-trial"   # кэш исходников Yaegi-плагинов (путь предзагрузки v2)
 
 # Kubernetes-провайдеры (k3s и др.) — см. docs/examples/playbook-k3s-provider.yml
 traefik_kubernetes_enabled: false      # true -> все три провайдера в статике (см. *_enabled ниже)
@@ -103,9 +106,10 @@ traefik_k8s_tls_store_secret_name: ""            # Secret от cert-manager (tls
 traefik_dashboard_enabled: false        # true -> роутер dashboard -> api@internal (нужен при api.insecure=false)
 traefik_dashboard_host: ""              # Host(...) правила — задавайте явно; иначе traefik.<ansible_facts.domain>
 traefik_dashboard_entrypoint: "websecure"
-traefik_dashboard_middlewares: "{{ ['dashboard-auth'] if traefik_enable_dashboard_basic_auth else [] }}"
-traefik_dashboard_users: []             # htpasswd-строки ["admin:$2b$..."] — алиас из роли traefik2
-traefik_dashboard_basic_auth: "{{ traefik_dashboard_users }}"  # dashboard-auth в 00-default-middlewares.yml; приоритет при задании обоих
+traefik_dashboard_auth_enabled: true    # basic-auth дашборда; требует пароль (иначе assert)
+traefik_dashboard_user: "admin"
+traefik_dashboard_password: ""          # из vault; обязателен при auth_enabled (автогенерации нет)
+traefik_dashboard_middlewares: "{{ ['dashboard-auth'] if (traefik_dashboard_enabled | bool and traefik_dashboard_auth_enabled | bool) else [] }}"
 traefik_dashboard_trusted_ips: []       # ipAllowList -> middleware "internal" (в middlewares — первым)
 
 # Пресеты middleware (File Provider, включены по умолчанию)
@@ -113,9 +117,7 @@ traefik_enable_security_headers: true
 traefik_enable_rate_limit: false
 traefik_rate_limit_average: 100
 traefik_rate_limit_burst: 50
-traefik_enable_dashboard_basic_auth: true
-traefik_dashboard_admin_user: "admin"
-traefik_dashboard_admin_password: ""      # из vault; "" = автогенерация
+traefik_rate_limit_period: "1s"
 traefik_middlewares_chain_name: "web-chain"  # chain presets для быстрого подключения
 
 # Logrotate
@@ -183,6 +185,26 @@ traefik_dynamic_configs:
             minVersion: VersionTLS12
             sniStrict: true
 ```
+
+Чтобы **добавить** свои файлы, не замещая default-список (в нём — встроенный
+`tls-options`), используйте `traefik_dynamic_configs_extra` — тот же формат
+`{name, content}`, тот же цикл рендера, но append:
+
+```yaml
+traefik_dynamic_configs_extra:
+  - name: my-robots-txt
+    content:
+      http:
+        middlewares:
+          my-robots-txt:
+            plugin:
+              robots-txt:
+                overwrite: true
+                customRules: "\nUser-agent: *\nDisallow: /\n"
+```
+
+(Ссылка на такой middleware в роутере — `my-robots-txt@file`; без определения
+Traefik молча отбрасывает весь роутер.)
 
 Кроме декларативного списка роль умеет **генерировать динамические конфиги из
 собственного Jinja2-шаблона** — когда ресурсы нужно вычислить динамически (по
@@ -277,7 +299,7 @@ entry point `websecure` автоматически удаляется — вис
 |---|---|---|
 | `traefik_enable_security_headers` | `true` | `X-Frame-Options`, `HSTS`, `XSS-Protection`, `contentTypeNosniff`, `referrerPolicy` |
 | `traefik_enable_rate_limit` | `false` | `rateLimit` (average 100, burst 50, period 1s) |
-| `traefik_enable_dashboard_basic_auth` | `true` | `basicAuth` для API/dashboard |
+| `traefik_dashboard_auth_enabled` | `true` | `basicAuth` (usersFile) для API/dashboard — только вместе с `traefik_dashboard_enabled` |
 
 Мидлвары рендерятся в `conf.d/00-default-middlewares.yml` и собираются в
 цепочку **`web-chain`** — укажите её в роутере:
@@ -285,11 +307,13 @@ entry point `websecure` автоматически удаляется — вис
 middlewares: ["web-chain@file"]
 ```
 
-Пароль дашборда либо задаётся из vault (`traefik_dashboard_admin_password`),
-либо генерируется автоматически при первом запуске и сохраняется в
-`{{ traefik_config_dir }}/dashboard-admin-password` (root:root 0600).
-Htpasswd-файл создаётся модулем `community.general.htpasswd` со схемой
-`apr_md5_crypt` (поддерживается Traefik). Требуется пакет `python3-passlib`.
+Basic-auth дашборда — единственный режим **usersFile**: пароль задаётся из
+vault (`traefik_dashboard_password`) и обязателен при
+`traefik_dashboard_auth_enabled: true` (иначе `assert` останавливает прогон —
+автогенерация и inline-пользователи удалены, см. CHANGELOG). Htpasswd-файл
+создаётся модулем `community.general.htpasswd` со схемой `apr_md5_crypt`
+(поддерживается Traefik) в `traefik_dashboard_auth_file` (0640); хеши не
+попадают в динамическую конфигурацию. Требуется пакет `python3-passlib`.
 
 Тестирование
 ------------
